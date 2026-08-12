@@ -1,4 +1,5 @@
 import argparse
+import csv
 import logging
 import os
 import random
@@ -81,6 +82,10 @@ def train_model(
     criterion = nn.CrossEntropyLoss() if model.n_classes > 1 else nn.BCEWithLogitsLoss()
     global_step = 0
 
+    log_path = Path('training_log.csv')
+    with open(log_path, 'w', newline='') as f:
+        csv.writer(f).writerow(['epoch', 'loss', 'dice'])
+
     # 5. Begin training
     for epoch in range(1, epochs + 1):
         model.train()
@@ -159,6 +164,11 @@ def train_model(
                         except:
                             pass
 
+        avg_loss = epoch_loss / len(train_loader)
+        epoch_dice = evaluate(model, val_loader, device, amp)
+        with open(log_path, 'a', newline='') as f:
+            csv.writer(f).writerow([epoch, avg_loss, float(epoch_dice)])
+
         if save_checkpoint:
             Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
             state_dict = model.state_dict()
@@ -192,9 +202,9 @@ if __name__ == '__main__':
     logging.info(f'Using device {device}')
 
     # Change here to adapt to your data
-    # n_channels=3 for RGB images
+    # n_channels=1 for grayscale ECG plot images
     # n_classes is the number of probabilities you want to get per pixel
-    model = UNet(n_channels=3, n_classes=args.classes, bilinear=args.bilinear)
+    model = UNet(n_channels=1, n_classes=args.classes, bilinear=args.bilinear)
     model = model.to(memory_format=torch.channels_last)
 
     logging.info(f'Network:\n'
