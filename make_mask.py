@@ -48,6 +48,10 @@ def generate_pair(df, template, name, img_dir="unet-src/data/imgs", mask_dir="un
     Image.fromarray(mask_img).save(mask_path)
 
 
-for i in range(22, 32):
+for i in range(32, 1012):
     df = pd.DataFrame(f["tracings"][i], columns=[rename.get(l, l) for l in ecgprep_leads])
     generate_pair(df, "1x3", f"example_{i}")
+
+for i in range(1012, 1032):
+    df = pd.DataFrame(f["tracings"][i], columns=[rename.get(l, l) for l in ecgprep_leads])
+    generate_pair(df, "1x3", f"example_{i}", img_dir="unet-src/data/test_imgs", mask_dir="unet-src/data/test_masks")
