@@ -2,3 +2,12 @@ ptb-xl/*.h5
 ptb-xl/records100/
 ptb-xl/records500/
 unet-src\checkpoints
+
+# generated dataset is regenerable from ptb-xl/ptb_preprocessed.h5 via make_mask.py -
+# don't bloat the repo with it, but keep the handful of files the README embeds
+unet-src/data/imgs/*
+unet-src/data/masks/*
+unet-src/data/test_imgs/*
+unet-src/data/test_masks/*
+!unet-src/data/test_imgs/example_20.png
+!unet-src/data/test_masks/example_20_mask.png
