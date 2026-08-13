@@ -10,6 +10,16 @@ from PIL import Image
 LEADS = ["I", "II", "V2"]  # top-to-bottom row order for the "1x3" template
 DURATION_S = 4096 / 400  # matches the original preprocessing (new_len / new_freq)
 
+# The mask's pixels are not arbitrary: they were rendered by pmecg using its own
+# real physical calibration (ECGPlotter default voltage=10mm/mV, at dpi=300 -
+# same dpi make_mask.py savefig()'d the training images at). Converting pixel
+# offset -> mV with THIS scale (instead of an ad-hoc std-based guess) is what
+# makes the reconstructed signal's proportions match the original.
+DPI = 300
+VOLTAGE_MM_PER_MV = 10.0
+MM_PER_INCH = 25.4
+PIXELS_PER_MV = (VOLTAGE_MM_PER_MV / MM_PER_INCH) * DPI
+
 
 def replot(pred_path, out_dir):
     name = os.path.splitext(os.path.basename(pred_path))[0]
@@ -34,8 +44,8 @@ def replot(pred_path, out_dir):
         predicted = s.notna()
         s = s.rolling(5, center=True, min_periods=1).mean()  # smooth pixel-jitter
         s[~predicted] = np.nan  # keep true gaps as gaps, don't let smoothing bridge them
-        baseline = s.median()
-        voltage = (baseline - s) / s.std() * 0.5  # rough, unitless-ish mV scale
+        baseline = s.median()  # arbitrary vertical reference, fine to estimate locally
+        voltage = (baseline - s) / PIXELS_PER_MV  # real mV, using pmecg's own calibration
         signal[lead] = voltage.to_numpy()
 
     df = pd.DataFrame(signal)

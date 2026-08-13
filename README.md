@@ -1,5 +1,7 @@
 # U-Net ECG Segmentation
 
+`mmecg` = Mask My ECG.
+
 Goal: train a model (U-Net) that takes an ECG plot image and masks/segments the region(s) of the ECG trace — i.e. extract the waveform area from any ECG plot.
 
 ## Structure
@@ -12,11 +14,11 @@ Goal: train a model (U-Net) that takes an ECG plot image and masks/segments the 
 
 **1. Input image.** `make_mask.py` renders an ECG plot from PTB-XL signal data via `pmecg`, styled like real ECG paper (grid, no calibration pulse/labels — see below for why). This is what the model receives as input.
 
-![input](unet-src/data/test_imgs/example_20.png)
+![input](readme_assets/input_example.png)
 
 **2. Ground truth mask.** For the same signal, `make_mask.py` also renders a bare version (no grid/decoration, trace only) and converts it to a binary neon-on-black mask — this is the label the model is trained to predict. Calibration pulse and lead labels are deliberately excluded from the *input* image too (not just the mask), because otherwise the model would be shown shapes it's never told to classify as background, and would learn false positives on them.
 
-![ground truth mask](unet-src/data/test_masks/example_20_mask.png)
+![ground truth mask](readme_assets/mask_example.png)
 
 **3. Training.** `unet-src/train.py` trains a U-Net (`unet-src/unet/`) on (image, mask) pairs from `unet-src/data/imgs`/`data/masks`, saving one checkpoint per epoch to `unet-src/checkpoints/` and per-epoch loss/Dice score to `unet-src/training_log.csv`. Below is the same held-out test image (never seen during training) predicted by the model at increasing epochs — epoch 1 barely finds anything, and it converges close to the ground truth by epoch 4:
 
