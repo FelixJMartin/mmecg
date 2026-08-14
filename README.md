@@ -58,3 +58,8 @@ pip install -r ecg-preprocessing/requirements.txt
 ## Data source
 
 PTB-XL dataset via PhysioNet, licensed CC BY 4.0 — attribution required if shared/published.
+
+## Credits
+
+- U-Net implementation vendored from [milesial/Pytorch-UNet](https://github.com/milesial/Pytorch-UNet)
+- ECG plot rendering via [bonassifabio/pmecg](https://github.com/bonassifabio/pmecg)
