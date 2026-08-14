@@ -13,7 +13,7 @@ DURATION_S = 4096 / 400  # matches the original preprocessing (new_len / new_fre
 # The mask's pixels are not arbitrary: they were rendered by pmecg using its own
 # real physical calibration (ECGPlotter default voltage=10mm/mV, at dpi=300 -
 # same dpi make_mask.py savefig()'d the training images at). Converting pixel
-# offset -> mV with THIS scale (instead of an ad-hoc std-based guess) is what
+# offset -> mV with THIS scale (instead ofkqqq an ad-hoc std-based guess) is what
 # makes the reconstructed signal's proportions match the original.
 DPI = 300
 VOLTAGE_MM_PER_MV = 10.0
@@ -43,7 +43,18 @@ def replot(pred_path, out_dir):
         s = pd.Series(centroid)
         predicted = s.notna()
         s = s.rolling(5, center=True, min_periods=1).mean()  # smooth pixel-jitter
-        s[~predicted] = np.nan  # keep true gaps as gaps, don't let smoothing bridge them
+        s[~predicted] = np.nan  # keep true internal gaps as gaps, don't let smoothing bridge them
+
+        # A long leading/trailing all-NaN run (the model just hasn't predicted
+        # anything at the very edges yet) makes pmecg apply its internal
+        # segment-gap margin and shift the whole trace ~150px right - confirmed
+        # via a synthetic repro. Fill only the EDGES with the nearest real value
+        # (flat line) to avoid that; true internal gaps stay NaN as intended.
+        first_valid, last_valid = s.first_valid_index(), s.last_valid_index()
+        if first_valid is not None:
+            s.iloc[:first_valid] = s.iloc[first_valid]
+            s.iloc[last_valid + 1:] = s.iloc[last_valid]
+
         baseline = s.median()  # arbitrary vertical reference, fine to estimate locally
         voltage = (baseline - s) / PIXELS_PER_MV  # real mV, using pmecg's own calibration
         signal[lead] = voltage.to_numpy()
@@ -84,5 +95,5 @@ def replot(pred_path, out_dir):
 
 
 if __name__ == "__main__":
-    for pred_path in sorted(glob.glob("test_predictions/*.png")):
-        replot(pred_path, "test_predictions_replotted")
+    for pred_path in sorted(glob.glob("Predictions/raw/*.png")):
+        replot(pred_path, "Predictions/replotted")
