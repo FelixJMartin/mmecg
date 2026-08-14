@@ -4,6 +4,10 @@
 
 Goal: train a model (U-Net) that takes an ECG plot image and masks/segments the region(s) of the ECG trace — i.e. extract the waveform area from any ECG plot.
 
+![U-Net architecture](unet-src/u-net-architecture.png)
+
+U-Net architecture diagram, from the original paper: Olaf Ronneberger, Philipp Fischer, Thomas Brox. ["U-Net: Convolutional Networks for Biomedical Image Segmentation"](https://arxiv.org/abs/1505.04597) (2015).
+
 ## Structure
 
 - `ptb-xl/` — PTB-XL dataset (metadata tracked; large waveform files `.h5`, `records100/`, `records500/` are gitignored, see [LICENSE.txt](ptb-xl/LICENSE.txt) for CC BY 4.0 attribution terms)
@@ -36,9 +40,6 @@ Loss and validation Dice per epoch for this run (`unet-src/training_log.csv`) �
 
 ![overlay comparison](readme_assets/overlay_example.png)
 
-`comparisons/compare_epochs.py` shows the same idea across all 5 epochs at once (yellow → green → teal → blue → purple), so you can see exactly which parts of the trace converge fastest — mostly the sharp QRS spikes, which take the longest to nail down:
-
-![epoch progression](comparisons/example_1030_epochs.png)
 
 ## Where things are
 
