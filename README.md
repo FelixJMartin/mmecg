@@ -4,7 +4,7 @@
 
 Goal: train a model (U-Net) that takes an ECG plot image and masks/segments the region(s) of the ECG trace — i.e. extract the waveform area from any ECG plot.
 
-![U-Net architecture](unet-src/u-net-architecture.png)
+![U-Net architecture](readme_assets/u-net-architecture.png)
 
 U-Net architecture diagram, from the original paper: Olaf Ronneberger, Philipp Fischer, Thomas Brox. ["U-Net: Convolutional Networks for Biomedical Image Segmentation"](https://arxiv.org/abs/1505.04597) (2015).
 
@@ -39,7 +39,6 @@ Loss and validation Dice per epoch for this run (`unet-src/training_log.csv`) �
 **5. Comparing against truth.** `comparisons/compare_overlay.py` overlays the raw predicted mask directly against the truth image (blue = truth only, red = predicted only, purple = both agree) — this is more reliable than comparing against the replot, since `pmecg`'s renderer has a data-dependent rendering drift on dense signals (documented in `replot_prediction.py`) that the raw mask isn't subject to:
 
 ![overlay comparison](readme_assets/overlay_example.png)
-
 
 ## Where things are
 
