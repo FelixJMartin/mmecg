@@ -20,13 +20,7 @@ Goal: train a model (U-Net) that takes an ECG plot image and masks/segments the 
 
 ![ground truth mask](readme_assets/mask_example.png)
 
-**3. Training.** `unet-src/train.py` trains a U-Net (`unet-src/unet/`) on (image, mask) pairs from `unet-src/data/imgs`/`data/masks`, saving one checkpoint per epoch to `unet-src/checkpoints/` and per-epoch loss/Dice score to `unet-src/training_log.csv`. Below is the same held-out test image (never seen during training) predicted by the model at increasing epochs — epoch 1 barely finds anything, and it converges close to the ground truth by epoch 4:
-
-| Epoch 1 | Epoch 2 | Epoch 3 | Epoch 4 | Epoch 5 |
-|---|---|---|---|---|
-| ![epoch1](Predictions/raw/example_1030_epoch1.png) | ![epoch2](Predictions/raw/example_1030_epoch2.png) | ![epoch3](Predictions/raw/example_1030_epoch3.png) | ![epoch4](Predictions/raw/example_1030_epoch4.png) | ![epoch5](Predictions/raw/example_1030_epoch5.png) |
-
-The final (epoch 5) prediction, standalone:
+**3. Training.** `unet-src/train.py` trains a U-Net (`unet-src/unet/`) on (image, mask) pairs from `unet-src/data/imgs`/`data/masks`, saving one checkpoint per epoch to `unet-src/checkpoints/` and per-epoch loss/Dice score to `unet-src/training_log.csv`. Below is the final (epoch 5) prediction on a held-out test image never seen during training:
 
 ![predicted mask](readme_assets/prediction_example.png)
 
