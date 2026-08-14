@@ -36,9 +36,7 @@ Loss and validation Dice per epoch for this run (`unet-src/training_log.csv`) �
 
 ![overlay comparison](readme_assets/overlay_example.png)
 
-`comparisons/compare_epochs.py` shows the same idea across all 5 epochs at once (yellow → green → teal → blue → purple), so you can see exactly which parts of the trace converge fastest — mostly the sharp QRS spikes, which take the longest to nail down:
 
-![epoch progression](comparisons/example_1030_epochs.png)
 
 ## Where things are
 
