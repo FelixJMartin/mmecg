@@ -21,9 +21,6 @@ U-Net architecture diagram, from the original paper: Olaf Ronneberger, Philipp F
 
 **1. Input image.** `make_mask.py` renders an ECG plot from PTB-XL signal data via `pmecg`, styled like real ECG paper (grid, no calibration pulse/labels — see below for why). This is what the model receives as input.
 
-<p align="center">
-  <img src="readme_assets/u-net-architecture.png" width="600">
-</p>
 
 **2. Ground truth mask.** For the same signal, `make_mask.py` also renders a bare version (no grid/decoration, trace only) and converts it to a binary neon-on-black mask — this is the label the model is trained to predict. Calibration pulse and lead labels are deliberately excluded from the *input* image too (not just the mask), because otherwise the model would be shown shapes it's never told to classify as background, and would learn false positives on them.
 
