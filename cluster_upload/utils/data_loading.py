@@ -13,14 +13,9 @@ from torch.utils.data import Dataset
 from tqdm import tqdm
 
 
+# make_mask.py only ever writes .png files, so no .npy/.pt handling needed here.
 def load_image(filename):
-    ext = splitext(filename)[1]
-    if ext == '.npy':
-        return Image.fromarray(np.load(filename))
-    elif ext in ['.pt', '.pth']:
-        return Image.fromarray(torch.load(filename).numpy())
-    else:
-        return Image.open(filename)
+    return Image.open(filename)
 
 
 def unique_mask_values(idx, mask_dir, mask_suffix):

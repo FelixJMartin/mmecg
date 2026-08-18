@@ -13,11 +13,14 @@ rename = {'DI':'I','DII':'II','DIII':'III','AVR':'aVR','AVL':'aVL','AVF':'aVF'}
 
 
 def generate_pair(df, template, name, img_dir="unet-src/data/imgs", mask_dir="unet-src/data/masks"):
-    configuration = pmecg.template_factory(template, df, leads_map=None)
+    '''
+    Full styled plot -> training image. Calibration pulse, lead labels, and
+    separators are off: none of them have a matching label in the mask, so
+    leaving them in only teaches the model false positives on non-trace shapes.
+    '''
 
-    # Full styled plot -> training image. Calibration pulse, lead labels, and
-    # separators are off: none of them have a matching label in the mask, so
-    # leaving them in only teaches the model false positives on non-trace shapes.
+    # make training image and save in data/img, just clean no labels. 
+    configuration = pmecg.template_factory(template, df, leads_map=None)
     image_plotter = pmecg.ECGPlotter(
         show_calibration=False,
         show_leads_labels=False,
@@ -26,7 +29,8 @@ def generate_pair(df, template, name, img_dir="unet-src/data/imgs", mask_dir="un
     img_path = f"{img_dir}/{name}.png"
     fig_img = image_plotter.plot(df, configuration=configuration, sampling_frequency=fs, show=False)
     fig_img.savefig(img_path, dpi=300, bbox_inches="tight")
-    Image.open(img_path).convert("L").save(img_path)
+    #L for greyscale image.
+    Image.open(img_path).convert("L").save(img_path)  
 
     # Bare trace only, no grid/labels/calibration -> source for the mask
     mask_plotter = pmecg.ECGPlotter(
@@ -48,10 +52,12 @@ def generate_pair(df, template, name, img_dir="unet-src/data/imgs", mask_dir="un
     Image.fromarray(mask_img).save(mask_path)
 
 
-for i in range(32, 1012):
+
+
+for i in range(0, 1000):
     df = pd.DataFrame(f["tracings"][i], columns=[rename.get(l, l) for l in ecgprep_leads])
     generate_pair(df, "1x3", f"example_{i}")
 
-for i in range(1012, 1032):
+for i in range(1000, 1050):
     df = pd.DataFrame(f["tracings"][i], columns=[rename.get(l, l) for l in ecgprep_leads])
     generate_pair(df, "1x3", f"example_{i}", img_dir="unet-src/data/test_imgs", mask_dir="unet-src/data/test_masks")
