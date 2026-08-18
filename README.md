@@ -5,7 +5,7 @@
 Goal: train a model (U-Net) that takes an ECG plot image and masks/segments the region(s) of the ECG trace — i.e. extract the waveform area from any ECG plot.
 
 <p align="center">
-  <img src="readme_assets/u-net-architecture.png" alt="U-Net architecture" width="600">
+  <img src="readme_assets/u-net-architecture.png" alt="U-Net architecture" width="500">
 </p>
 
 
@@ -21,27 +21,39 @@ U-Net architecture diagram, from the original paper: Olaf Ronneberger, Philipp F
 
 **1. Input image.** `make_mask.py` renders an ECG plot from PTB-XL signal data via `pmecg`, styled like real ECG paper (grid, no calibration pulse/labels — see below for why). This is what the model receives as input.
 
-![input](readme_assets/input_example.png)
+<p align="center">
+  <img src="readme_assets/u-net-architecture.png" width="600">
+</p>
 
 **2. Ground truth mask.** For the same signal, `make_mask.py` also renders a bare version (no grid/decoration, trace only) and converts it to a binary neon-on-black mask — this is the label the model is trained to predict. Calibration pulse and lead labels are deliberately excluded from the *input* image too (not just the mask), because otherwise the model would be shown shapes it's never told to classify as background, and would learn false positives on them.
 
-![ground truth mask](readme_assets/mask_example.png)
+<p align="center">
+  <img src="readme_assets/mask_example.png" alt="ground truth mask" width="600">
+</p>
 
 **3. Training.** `unet-src/train.py` trains a U-Net (`unet-src/unet/`) on (image, mask) pairs from `unet-src/data/imgs`/`data/masks`, saving one checkpoint per epoch to `unet-src/checkpoints/` and per-epoch loss/Dice score to `unet-src/training_log.csv`. Below is the final (epoch 5) prediction on a held-out test image never seen during training:
 
-![predicted mask](readme_assets/prediction_example.png)
+<p align="center">
+  <img src="readme_assets/prediction_example.png" alt="predicted mask" width="600">
+</p>
 
 Loss and validation Dice per epoch for this run (`unet-src/training_log.csv`) — loss drops sharply after epoch 1, Dice is already at 0.93 by the first epoch and settles around 0.98-0.99:
 
-![training curve](readme_assets/training_curve.png)
+<p align="center">
+  <img src="readme_assets/training_curve.png" alt="training curve" width="600">
+</p>
 
 **4. Replotting + density check.** `pmecg/replot_prediction.py` takes a predicted mask, extracts a rough signal back out of it (per-column trace centroid, gaps left as gaps — no interpolation across what the model didn't predict), and re-renders it through `pmecg` in the same styled format as the original input. It also plots a row-density histogram alongside the image: for each row, how many trace pixels the prediction has. This produces 3 distinct peaks (one per lead) separated by valleys, which is what future work will use to automatically split a 3-lead plot into 3 separate per-lead images.
 
-![replotted with density](Predictions/replotted/example_1030_epoch5_density.png)
+<p align="center">
+  <img src="Predictions/replotted/example_1030_epoch5_density.png" alt="replotted with density" width="600">
+</p>
 
 **5. Comparing against truth.** `comparisons/compare_overlay.py` overlays the raw predicted mask directly against the truth image (blue = truth only, red = predicted only, purple = both agree) — this is more reliable than comparing against the replot, since `pmecg`'s renderer has a data-dependent rendering drift on dense signals (documented in `replot_prediction.py`) that the raw mask isn't subject to:
 
-![overlay comparison](readme_assets/overlay_example.png)
+<p align="center">
+  <img src="readme_assets/overlay_example.png" alt="overlay comparison" width="600">
+</p>
 
 ## Where things are
 
