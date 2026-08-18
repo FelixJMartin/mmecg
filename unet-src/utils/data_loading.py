@@ -2,9 +2,7 @@ import logging
 import numpy as np
 import torch
 from PIL import Image
-from functools import lru_cache
 from functools import partial
-from itertools import repeat
 from multiprocessing import Pool
 from os import listdir
 from os.path import splitext, isfile, join
@@ -17,7 +15,7 @@ from tqdm import tqdm
 def load_image(filename):
     return Image.open(filename)
 
-
+# Returns the distinct pixel values (or RGB tuples) found in one mask file.
 def unique_mask_values(idx, mask_dir, mask_suffix):
     mask_file = list(mask_dir.glob(idx + mask_suffix + '.*'))[0]
     mask = np.asarray(load_image(mask_file))
@@ -36,20 +34,25 @@ class BasicDataset(Dataset):
         self.mask_dir = Path(mask_dir)
         assert 0 < scale <= 1, 'Scale must be between 0 and 1'
         self.scale = scale
-        self.mask_suffix = mask_suffix
+        self.mask_suffix = mask_suffix  # lets mask filenames differ from image filenames, e.g. img001_mask.png
 
+        # Sample IDs = image filenames without extension. Each id is later paired with
+        # id + mask_suffix + <ext> to find the matching mask.
         self.ids = [splitext(file)[0] for file in listdir(images_dir) if isfile(join(images_dir, file)) and not file.startswith('.')]
         if not self.ids:
             raise RuntimeError(f'No input file found in {images_dir}, make sure you put your images there')
 
-        logging.info(f'Creating dataset with {len(self.ids)} examples')
-        logging.info('Scanning mask files to determine unique values')
+        logging.info(f'Creating dataset with {len(self.ids)} examples, scanning masks for unique values')
+        # One-time upfront pass over every mask (parallelized) to find every distinct
+        # label value across the whole dataset before training starts.
         with Pool() as p:
             unique = list(tqdm(
                 p.imap(partial(unique_mask_values, mask_dir=self.mask_dir, mask_suffix=self.mask_suffix), self.ids),
                 total=len(self.ids)
             ))
 
+        # Merge the per-file unique values into one sorted list: this becomes the
+        # value -> class-index mapping used by preprocess() below.
         self.mask_values = list(sorted(np.unique(np.concatenate(unique), axis=0).tolist()))
         logging.info(f'Unique mask values: {self.mask_values}')
 
@@ -61,10 +64,14 @@ class BasicDataset(Dataset):
         w, h = pil_img.size
         newW, newH = int(scale * w), int(scale * h)
         assert newW > 0 and newH > 0, 'Scale is too small, resized images would have no pixel'
+        # NEAREST for masks so resizing never invents new label values between classes;
+        # BICUBIC for images since smooth interpolation is fine (and looks better) there.
         pil_img = pil_img.resize((newW, newH), resample=Image.NEAREST if is_mask else Image.BICUBIC)
         img = np.asarray(pil_img)
 
         if is_mask:
+            # Remap each raw pixel value/color to its class index (0, 1, 2, ...)
+            # using the position of that value in mask_values.
             mask = np.zeros((newH, newW), dtype=np.int64)
             for i, v in enumerate(mask_values):
                 if img.ndim == 2:
@@ -75,11 +82,14 @@ class BasicDataset(Dataset):
             return mask
 
         else:
+            # Move channel axis to the front (H, W, C) -> (C, H, W) as expected by PyTorch;
+            # grayscale images get a leading channel dim of 1 instead.
             if img.ndim == 2:
                 img = img[np.newaxis, ...]
             else:
                 img = img.transpose((2, 0, 1))
 
+            # Normalize 0-255 images to 0-1; leave already-normalized/float images alone.
             if (img > 1).any():
                 img = img / 255.0
 
@@ -101,6 +111,8 @@ class BasicDataset(Dataset):
         img = self.preprocess(self.mask_values, img, self.scale, is_mask=False)
         mask = self.preprocess(self.mask_values, mask, self.scale, is_mask=True)
 
+        # .copy() avoids "negative stride" errors torch.as_tensor can raise on some
+        # numpy views (e.g. after transpose); .contiguous() ensures a clean memory layout.
         return {
             'image': torch.as_tensor(img.copy()).float().contiguous(),
             'mask': torch.as_tensor(mask.copy()).long().contiguous()

@@ -6,7 +6,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
-from torchvision import transforms
 
 from utils.data_loading import BasicDataset
 from unet import UNet
@@ -18,16 +17,22 @@ def predict_img(net,
                 scale_factor=1,
                 out_threshold=0.5):
     net.eval()
+    # Same resize/normalize/channel-order steps used at training time (mask_values
+    # unused here since is_mask=False), then add the batch dim the model expects.
     img = torch.from_numpy(BasicDataset.preprocess(None, full_img, scale_factor, is_mask=False))
     img = img.unsqueeze(0)
     img = img.to(device=device, dtype=torch.float32)
 
     with torch.no_grad():
         output = net(img).cpu()
+        # Model saw the image at scale_factor resolution; stretch predictions back
+        # to the original image size before turning them into a mask.
         output = F.interpolate(output, (full_img.size[1], full_img.size[0]), mode='bilinear')
         if net.n_classes > 1:
+            # Per pixel, pick whichever class got the highest score.
             mask = output.argmax(dim=1)
         else:
+            # Binary case: turn the sigmoid probability into a hard yes/no mask.
             mask = torch.sigmoid(output) > out_threshold
 
     return mask[0].long().squeeze().numpy()
@@ -60,12 +65,14 @@ def get_output_filenames(args):
 
 
 def mask_to_image(mask: np.ndarray, mask_values):
+    # Inverse of BasicDataset.preprocess's class-index mapping: mask currently holds
+    # class indices (0, 1, ...); rebuild an image using the original pixel values/colors.
     if isinstance(mask_values[0], list):
-        out = np.zeros((mask.shape[-2], mask.shape[-1], len(mask_values[0])), dtype=np.uint8)
+        out = np.zeros((mask.shape[-2], mask.shape[-1], len(mask_values[0])), dtype=np.uint8)  # RGB mask
     elif mask_values == [0, 1]:
-        out = np.zeros((mask.shape[-2], mask.shape[-1]), dtype=bool)
+        out = np.zeros((mask.shape[-2], mask.shape[-1]), dtype=bool)  # plain binary mask
     else:
-        out = np.zeros((mask.shape[-2], mask.shape[-1]), dtype=np.uint8)
+        out = np.zeros((mask.shape[-2], mask.shape[-1]), dtype=np.uint8)  # grayscale label values
 
     if mask.ndim == 3:
         mask = np.argmax(mask, axis=0)

@@ -2,12 +2,9 @@ import argparse
 import csv
 import logging
 import os
-import random
-import sys
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchvision.transforms as transforms
 import torchvision.transforms.functional as TF
 from pathlib import Path
 from torch import optim
@@ -22,23 +19,27 @@ from utils.dice_score import dice_loss
 
 dir_img = Path('./data/imgs/')
 dir_mask = Path('./data/masks/')
-dir_checkpoint = Path('./checkpoints/')
 
 
 def train_model(
         model,
         device,
         epochs: int = 5,
-        batch_size: int = 1,
+        batch_size: int = 4,
         learning_rate: float = 1e-5,
         val_percent: float = 0.1,
         save_checkpoint: bool = True,
-        img_scale: float = 0.5,
+        img_scale: float = 1.0,
         amp: bool = False,
         weight_decay: float = 1e-8,
         momentum: float = 0.999,
         gradient_clipping: float = 1.0,
+        run_dir: str = None,
 ):
+    run_dir = Path(run_dir) if run_dir else Path('.')
+    checkpoint_dir = run_dir / 'checkpoints'
+    log_path = run_dir / 'training_log.csv'
+
     # 1. Create dataset
     try:
         dataset = CarvanaDataset(dir_img, dir_mask, img_scale)
@@ -82,7 +83,6 @@ def train_model(
     criterion = nn.CrossEntropyLoss() if model.n_classes > 1 else nn.BCEWithLogitsLoss()
     global_step = 0
 
-    log_path = Path('training_log.csv')
     with open(log_path, 'w', newline='') as f:
         csv.writer(f).writerow(['epoch', 'loss', 'dice'])
 
@@ -170,26 +170,28 @@ def train_model(
             csv.writer(f).writerow([epoch, avg_loss, float(epoch_dice)])
 
         if save_checkpoint:
-            Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
             state_dict = model.state_dict()
             state_dict['mask_values'] = dataset.mask_values
-            torch.save(state_dict, str(dir_checkpoint / 'checkpoint_epoch{}.pth'.format(epoch)))
+            torch.save(state_dict, str(checkpoint_dir / 'checkpoint_epoch{}.pth'.format(epoch)))
             logging.info(f'Checkpoint {epoch} saved!')
 
 
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images and target masks')
     parser.add_argument('--epochs', '-e', metavar='E', type=int, default=5, help='Number of epochs')
-    parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=1, help='Batch size')
+    parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=4, help='Batch size')
     parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-5,
                         help='Learning rate', dest='lr')
     parser.add_argument('--load', '-f', type=str, default=False, help='Load model from a .pth file')
-    parser.add_argument('--scale', '-s', type=float, default=0.5, help='Downscaling factor of the images')
+    parser.add_argument('--scale', '-s', type=float, default=1.0, help='Downscaling factor of the images')
     parser.add_argument('--validation', '-v', dest='val', type=float, default=10.0,
                         help='Percent of the data that is used as validation (0-100)')
     parser.add_argument('--amp', action='store_true', default=False, help='Use mixed precision')
     parser.add_argument('--bilinear', action='store_true', default=False, help='Use bilinear upsampling')
     parser.add_argument('--classes', '-c', type=int, default=2, help='Number of classes')
+    parser.add_argument('--run-dir', dest='run_dir', type=str, default=None,
+                        help='Directory to write checkpoints/ and training_log.csv into (default: current dir)')
 
     return parser.parse_args()
 
@@ -228,7 +230,8 @@ if __name__ == '__main__':
             device=device,
             img_scale=args.scale,
             val_percent=args.val / 100,
-            amp=args.amp
+            amp=args.amp,
+            run_dir=args.run_dir
         )
     except torch.cuda.OutOfMemoryError:
         logging.error('Detected OutOfMemoryError! '
@@ -244,5 +247,6 @@ if __name__ == '__main__':
             device=device,
             img_scale=args.scale,
             val_percent=args.val / 100,
-            amp=args.amp
+            amp=args.amp,
+            run_dir=args.run_dir
         )
