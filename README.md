@@ -4,7 +4,9 @@
 
 Goal: train a model (U-Net) that takes an ECG plot image and masks/segments the region(s) of the ECG trace — i.e. extract the waveform area from any ECG plot.
 
-<img src="readme_assets/u-net-architecture.png" alt="U-Net architecture" width="600">
+<p align="center">
+  <img src="readme_assets/u-net-architecture.png" alt="U-Net architecture" width="600">
+</p>
 
 
 U-Net architecture diagram, from the original paper: Olaf Ronneberger, Philipp Fischer, Thomas Brox. ["U-Net: Convolutional Networks for Biomedical Image Segmentation"](https://arxiv.org/abs/1505.04597) (2015).
