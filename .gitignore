@@ -32,4 +32,5 @@ venv/
 .venv/
 .vscode/
 .idea/
+.deepeval/
 
