@@ -1,13 +1,15 @@
 import logging
+import random
 import numpy as np
 import torch
+from collections import defaultdict
 from PIL import Image
 from functools import partial
 from multiprocessing import Pool
 from os import listdir
 from os.path import splitext, isfile, join
 from pathlib import Path
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler, Subset
 from tqdm import tqdm
 
 
@@ -122,3 +124,49 @@ class BasicDataset(Dataset):
 class CarvanaDataset(BasicDataset):
     def __init__(self, images_dir, mask_dir, scale=1):
         super().__init__(images_dir, mask_dir, scale, mask_suffix='_mask')
+
+
+class GroupedBatchSampler(Sampler):
+    '''Only ever batches together examples whose on-disk image is the same pixel
+    size. The mixed-layout dataset (1x12/2x6/4x3+1 templates) has a different
+    height per template, and the default collate can't torch.stack tensors of
+    different shapes -- so a random batch mixing templates would crash.'''
+
+    def __init__(self, dataset, batch_size, shuffle=True, drop_last=False):
+        # `dataset` may be a Subset (e.g. from random_split) wrapping a BasicDataset;
+        # unwrap it so we can read .ids/.images_dir, but keep batches indexed the
+        # way DataLoader expects them: local indices into whatever was passed in.
+        if isinstance(dataset, Subset):
+            base, subset_indices = dataset.dataset, dataset.indices
+        else:
+            base, subset_indices = dataset, range(len(dataset))
+
+        groups = defaultdict(list)
+        for local_idx, global_idx in enumerate(subset_indices):
+            img_file = next(base.images_dir.glob(base.ids[global_idx] + '.*'))
+            with Image.open(img_file) as im:
+                groups[im.size].append(local_idx)
+        self.groups = list(groups.values())
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.drop_last = drop_last
+
+    def __iter__(self):
+        batches = []
+        for indices in self.groups:
+            indices = indices.copy()
+            if self.shuffle:
+                random.shuffle(indices)
+            for i in range(0, len(indices), self.batch_size):
+                batch = indices[i:i + self.batch_size]
+                if self.drop_last and len(batch) < self.batch_size:
+                    continue
+                batches.append(batch)
+        if self.shuffle:
+            random.shuffle(batches)
+        return iter(batches)
+
+    def __len__(self):
+        if self.drop_last:
+            return sum(len(g) // self.batch_size for g in self.groups)
+        return sum(-(-len(g) // self.batch_size) for g in self.groups)
