@@ -54,7 +54,7 @@ Loss and validation Dice per epoch for this run (`unet-src/training_log.csv`) �
 
 ## Where things are
 
-- `make_dataset.py` — generates (image, mask) training pairs from `ptb-xl/ptb_preprocessed.h5` into `unet-src/data/mixed_imgs`/`mixed_masks` (records 0-999) and a held-out set into `mixed_test_imgs`/`mixed_test_masks` (records 1000-1099), with a random layout template per record logged to `dataset_index.csv`/`test_index.csv`
+- `make_dataset.py` — generates (image, mask) training pairs from `ptb-xl/ptb_preprocessed.h5` into `unet-src/data/imgs`/`masks` (records 0-499) and a held-out set into `test_imgs`/`test_masks` (records 500-549), with a random layout template per record logged to `dataset_index.csv`/`test_index.csv`
 - `unet-src/train.py` — trains the model, saves checkpoints to `unet-src/checkpoints/` and a per-epoch log to `unet-src/training_log.csv`
 - `unet-src/predict.py` — runs a trained checkpoint on an input image, saves the predicted mask
 - `digitize/raw_prediction_density.py` — takes a predicted mask, reconstructs a signal, replots it via `pmecg`, and adds the row-density histogram; reads from `Predictions/raw/`, outputs to `Predictions/replotted/`

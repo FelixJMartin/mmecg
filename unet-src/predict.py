@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 
-from utils.data_loading import BasicDataset
+from utils.data_loading import BasicDataset, IDX_TO_TEMPLATE
 from unet import UNet
 
 # Predict image using model, net= model, full img, device=cpu, threshold
@@ -24,8 +24,18 @@ def predict_img(net,
     img = img.unsqueeze(0)                                                                       # unsqueeze(0) fakes a batch of size 1.
     img = img.to(device=device, dtype=torch.float32)
 
+    layout = None
     with torch.no_grad():                       #disable gradient tracking 
-        output = net(img).cpu()                 #producing raw logits of shape (1, n_classes, h_scaled, w_scaled)
+        output = net(img)                       #producing raw logits of shape (1, n_classes, h_scaled, w_scaled)
+        if getattr(net, 'n_layouts', None):
+            # net returns (segmentation, layout logits) once the layout head is enabled
+            output, cls_logits = output
+            probs = F.softmax(cls_logits.cpu()[0], dim=0)
+            idx = int(probs.argmax())
+            # softmax, not just argmax: the confidence is worth having downstream, where a
+            # confidently-wrong layout would silently mis-slice every lead row.
+            layout = (IDX_TO_TEMPLATE[idx], float(probs[idx]))
+        output = output.cpu()
         output = F.interpolate(output, (full_img.size[1], full_img.size[0]), mode='bilinear') #Resizes the output mask back up to the original image size.
         if net.n_classes > 1:
             mask = output.argmax(dim=1)
@@ -36,7 +46,7 @@ def predict_img(net,
         mask = mask.long()      # cast bool/index values to integers
         mask = mask.squeeze()   # drop any leftover size-1 dims: (1, H, W) -> (H, W)
         mask = mask.numpy()     # convert tensor -> plain numpy array
-        return mask
+        return mask, layout
 
 
 def get_args():
@@ -51,6 +61,9 @@ def get_args():
                         help='Scale factor for the input images')
     parser.add_argument('--bilinear', action='store_true', default=False, help='Use bilinear upsampling')
     parser.add_argument('--classes', '-c', type=int, default=2, help='Number of classes')
+    parser.add_argument('--layouts', type=int, default=None,
+                        help='Set to 3 for a checkpoint trained with the layout head. '
+                             'Must match training, or the state_dict will not load.')
     
     return parser.parse_args()
 
@@ -79,7 +92,8 @@ if __name__ == '__main__':
     in_files = args.input
     out_files = get_output_filenames(args)
 
-    net = UNet(n_channels=1, n_classes=args.classes, bilinear=args.bilinear)
+    net = UNet(n_channels=1, n_classes=args.classes, bilinear=args.bilinear,
+               n_layouts=args.layouts)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logging.info(f'Loading model {args.model}')
@@ -96,11 +110,13 @@ if __name__ == '__main__':
         logging.info(f'Predicting image {filename} ...')
         img = Image.open(filename)
 
-        mask = predict_img(net=net,
+        mask, layout = predict_img(net=net,
                            full_img=img,
                            scale_factor=args.scale,
                            out_threshold=args.mask_threshold,
                            device=device)
+        if layout is not None:
+            logging.info(f'Predicted layout: {layout[0]}  (confidence {layout[1]:.3f})')
 
         out_filename = out_files[i]
         result = mask_to_image(mask)

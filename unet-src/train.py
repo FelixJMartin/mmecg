@@ -12,13 +12,14 @@ from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 
 import wandb
-from evaluate import evaluate
+from evaluate import evaluate, format_confusion
 from unet import UNet
 from utils.data_loading import BasicDataset, CarvanaDataset
 from utils.dice_score import dice_loss
 
 dir_img = Path('./data/imgs/')
 dir_mask = Path('./data/masks/')
+dir_index = Path('./data/dataset_index.csv')   # name -> layout template, for the layout head
 dir_checkpoint = Path('./checkpoints/')
 
 
@@ -41,7 +42,8 @@ def train_model(
     try:
         dataset = CarvanaDataset(dir_img, dir_mask, img_scale)
     except (AssertionError, RuntimeError, IndexError):
-        dataset = BasicDataset(dir_img, dir_mask, img_scale)
+        dataset = BasicDataset(dir_img, dir_mask, img_scale,
+                               index_csv=dir_index if model.n_layouts else None)
 
     # 2. Split into train / validation partitions
     n_val = int(len(dataset) * val_percent)
@@ -78,11 +80,13 @@ def train_model(
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=5)  # goal: maximize Dice score
     grad_scaler = torch.cuda.amp.GradScaler(enabled=amp)
     criterion = nn.CrossEntropyLoss() if model.n_classes > 1 else nn.BCEWithLogitsLoss()
+    # Layout is 3 mutually exclusive templates -> CrossEntropy, not BCE.
+    cls_criterion = nn.CrossEntropyLoss()
     global_step = 0
 
     log_path = Path('training_log.csv')
     with open(log_path, 'w', newline='') as f:
-        csv.writer(f).writerow(['epoch', 'loss', 'dice'])
+        csv.writer(f).writerow(['epoch', 'loss', 'dice', 'layout_acc'])
 
     # 5. Begin training
     for epoch in range(1, epochs + 1):
@@ -91,6 +95,7 @@ def train_model(
         with tqdm(total=n_train, desc=f'Epoch {epoch}/{epochs}', unit='img') as pbar:
             for batch in train_loader:
                 images, true_masks = batch['image'], batch['mask']
+                true_templates = batch['template'].to(device=device) if 'template' in batch else None
 
                 assert images.shape[1] == model.n_channels, \
                     f'Network has been defined with {model.n_channels} input channels, ' \
@@ -101,7 +106,8 @@ def train_model(
                 true_masks = true_masks.to(device=device, dtype=torch.long)
 
                 with torch.autocast(device.type if device.type != 'mps' else 'cpu', enabled=amp):
-                    masks_pred = model(images)
+                    out = model(images)
+                    masks_pred, cls_pred = out if model.n_layouts else (out, None)
                     if model.n_classes == 1:
                         loss = criterion(masks_pred.squeeze(1), true_masks.float())
                         loss += dice_loss(F.sigmoid(masks_pred.squeeze(1)), true_masks.float(), multiclass=False)
@@ -112,6 +118,10 @@ def train_model(
                             F.one_hot(true_masks, model.n_classes).permute(0, 3, 1, 2).float(),
                             multiclass=True
                         )
+                    if cls_pred is not None:
+                        # Added un-weighted: the head is detached from the encoder, so this
+                        # term only ever updates the head's own 3k params. It cannot move dice.
+                        loss = loss + cls_criterion(cls_pred, true_templates)
 
                 optimizer.zero_grad(set_to_none=True)
                 grad_scaler.scale(loss).backward()
@@ -142,10 +152,11 @@ def train_model(
                             if not (torch.isinf(value.grad) | torch.isnan(value.grad)).any():
                                 histograms['Gradients/' + tag] = wandb.Histogram(value.grad.data.cpu())
 
-                        val_score = evaluate(model, val_loader, device, amp)
-                        scheduler.step(val_score)
+                        val_score, val_acc, _ = evaluate(model, val_loader, device, amp)
+                        scheduler.step(val_score)   # LR schedule still keyed on dice only
 
-                        logging.info('Validation Dice score: {}'.format(val_score))
+                        logging.info('Validation Dice score: {}{}'.format(
+                            val_score, '' if val_acc is None else f'  |  layout acc: {val_acc:.4f}'))
                         try:
                             experiment.log({
                                 'learning rate': optimizer.param_groups[0]['lr'],
@@ -163,9 +174,13 @@ def train_model(
                             pass
 
         avg_loss = epoch_loss / len(train_loader)
-        epoch_dice = evaluate(model, val_loader, device, amp)
+        epoch_dice, epoch_acc, epoch_cm = evaluate(model, val_loader, device, amp)
         with open(log_path, 'a', newline='') as f:
-            csv.writer(f).writerow([epoch, avg_loss, float(epoch_dice)])
+            csv.writer(f).writerow([epoch, avg_loss, float(epoch_dice), epoch_acc])
+        logging.info(f'epoch {epoch}: loss={avg_loss:.5f} dice={float(epoch_dice):.4f} '
+                     f'layout_acc={"n/a" if epoch_acc is None else f"{epoch_acc:.4f}"}')
+        if epoch_cm is not None:
+            logging.info('layout confusion matrix:' + chr(10) + format_confusion(epoch_cm))
 
         if save_checkpoint:
             Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
@@ -188,6 +203,9 @@ def get_args():
     parser.add_argument('--amp', action='store_true', default=False, help='Use mixed precision')
     parser.add_argument('--bilinear', action='store_true', default=False, help='Use bilinear upsampling')
     parser.add_argument('--classes', '-c', type=int, default=2, help='Number of classes')
+    parser.add_argument('--layouts', type=int, default=None,
+                        help='Number of layout templates (3) to enable the detached layout head. '
+                             'Omit for segmentation only.')
 
     return parser.parse_args()
 
@@ -202,7 +220,8 @@ if __name__ == '__main__':
     # Change here to adapt to your data
     # n_channels=1 for grayscale ECG plot images
     # n_classes is the number of probabilities you want to get per pixel
-    model = UNet(n_channels=1, n_classes=args.classes, bilinear=args.bilinear)
+    model = UNet(n_channels=1, n_classes=args.classes, bilinear=args.bilinear,
+                 n_layouts=args.layouts)   # detach_head=True by default
     model = model.to(memory_format=torch.channels_last)
 
     logging.info(f'Network:\n'

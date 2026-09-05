@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "ecg-preprocess
 from ecgprep.img_helpers import vectorize_single_lead, ScaleFromPixels
 
 NAME = "example_1000_epoch10"
-SOURCE_IMG = "unet-src/data/mixed_test_imgs/example_1000.png"
+SOURCE_IMG = "unet-src/data/test_imgs/example_1000.png"
 BOUNDARIES_CSV = f"Predictions/replotted/{NAME}_row_boundaries.csv"
 PIECES_GLOB = f"Predictions/pieces/{NAME}_piece*.png"
 OUT_DIR = "Predictions/pieces"

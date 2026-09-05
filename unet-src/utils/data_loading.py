@@ -1,15 +1,14 @@
+import csv
 import logging
-import random
 import numpy as np
 import torch
-from collections import defaultdict
 from PIL import Image
 from functools import partial
 from multiprocessing import Pool
 from os import listdir
 from os.path import splitext, isfile, join
 from pathlib import Path
-from torch.utils.data import Dataset, Sampler, Subset
+from torch.utils.data import Dataset
 from tqdm import tqdm
 
 
@@ -30,8 +29,15 @@ def unique_mask_values(idx, mask_dir, mask_suffix):
         raise ValueError(f'Loaded masks should have 2 or 3 dimensions, found {mask.ndim}')
 
 
+# Layout template -> class index for the classification head. FROZEN: changing this
+# ordering silently reinterprets every checkpoint trained before the change.
+TEMPLATE_TO_IDX = {'1x12': 0, '2x6': 1, '4x3+1': 2}
+IDX_TO_TEMPLATE = {v: k for k, v in TEMPLATE_TO_IDX.items()}
+
+
 class BasicDataset(Dataset):
-    def __init__(self, images_dir: str, mask_dir: str, scale: float = 1.0, mask_suffix: str = ''):
+    def __init__(self, images_dir: str, mask_dir: str, scale: float = 1.0, mask_suffix: str = '',
+                 index_csv: str = None):
         self.images_dir = Path(images_dir)
         self.mask_dir = Path(mask_dir)
         assert 0 < scale <= 1, 'Scale must be between 0 and 1'
@@ -57,6 +63,21 @@ class BasicDataset(Dataset):
         # value -> class-index mapping used by preprocess() below.
         self.mask_values = list(sorted(np.unique(np.concatenate(unique), axis=0).tolist()))
         logging.info(f'Unique mask values: {self.mask_values}')
+
+        # Layout label per sample, read from make_dataset.py's index CSV (name,record,template).
+        # Optional: without it the dataset yields images+masks only, exactly as before, so
+        # segmentation-only training keeps working unchanged.
+        self.templates = None
+        if index_csv is not None:
+            with open(index_csv) as f:
+                lookup = {row['name']: row['template'] for row in csv.DictReader(f)}
+            missing = [i for i in self.ids if i not in lookup]
+            # Fail loudly: a silent default here would label whole records as class 0.
+            assert not missing, f'{len(missing)} ids missing from {index_csv}, e.g. {missing[:3]}'
+            self.templates = {i: TEMPLATE_TO_IDX[lookup[i]] for i in self.ids}
+            counts = {t: sum(1 for v in self.templates.values() if v == i)
+                      for t, i in TEMPLATE_TO_IDX.items()}
+            logging.info(f'Layout labels loaded from {index_csv}: {counts}')
 
     def __len__(self):
         return len(self.ids)
@@ -115,58 +136,16 @@ class BasicDataset(Dataset):
 
         # .copy() avoids "negative stride" errors torch.as_tensor can raise on some
         # numpy views (e.g. after transpose); .contiguous() ensures a clean memory layout.
-        return {
+        sample = {
             'image': torch.as_tensor(img.copy()).float().contiguous(),
             'mask': torch.as_tensor(mask.copy()).long().contiguous()
         }
+        if self.templates is not None:
+            # Scalar class index (0/1/2); CrossEntropyLoss wants indices, not one-hot.
+            sample['template'] = torch.tensor(self.templates[name], dtype=torch.long)
+        return sample
 
 
 class CarvanaDataset(BasicDataset):
     def __init__(self, images_dir, mask_dir, scale=1):
         super().__init__(images_dir, mask_dir, scale, mask_suffix='_mask')
-
-
-class GroupedBatchSampler(Sampler):
-    '''Only ever batches together examples whose on-disk image is the same pixel
-    size. The mixed-layout dataset (1x12/2x6/4x3+1 templates) has a different
-    height per template, and the default collate can't torch.stack tensors of
-    different shapes -- so a random batch mixing templates would crash.'''
-
-    def __init__(self, dataset, batch_size, shuffle=True, drop_last=False):
-        # `dataset` may be a Subset (e.g. from random_split) wrapping a BasicDataset;
-        # unwrap it so we can read .ids/.images_dir, but keep batches indexed the
-        # way DataLoader expects them: local indices into whatever was passed in.
-        if isinstance(dataset, Subset):
-            base, subset_indices = dataset.dataset, dataset.indices
-        else:
-            base, subset_indices = dataset, range(len(dataset))
-
-        groups = defaultdict(list)
-        for local_idx, global_idx in enumerate(subset_indices):
-            img_file = next(base.images_dir.glob(base.ids[global_idx] + '.*'))
-            with Image.open(img_file) as im:
-                groups[im.size].append(local_idx)
-        self.groups = list(groups.values())
-        self.batch_size = batch_size
-        self.shuffle = shuffle
-        self.drop_last = drop_last
-
-    def __iter__(self):
-        batches = []
-        for indices in self.groups:
-            indices = indices.copy()
-            if self.shuffle:
-                random.shuffle(indices)
-            for i in range(0, len(indices), self.batch_size):
-                batch = indices[i:i + self.batch_size]
-                if self.drop_last and len(batch) < self.batch_size:
-                    continue
-                batches.append(batch)
-        if self.shuffle:
-            random.shuffle(batches)
-        return iter(batches)
-
-    def __len__(self):
-        if self.drop_last:
-            return sum(len(g) // self.batch_size for g in self.groups)
-        return sum(-(-len(g) // self.batch_size) for g in self.groups)
