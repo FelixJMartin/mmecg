@@ -2,35 +2,41 @@ import argparse
 import logging
 import os
 
+# Imports
 import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
-from torchvision import transforms
 
 from utils.data_loading import BasicDataset
 from unet import UNet
-from utils.utils import plot_img_and_mask
 
+# Predict image using model, net= model, full img, device=cpu, threshold
 def predict_img(net,
                 full_img,
                 device,
                 scale_factor=1,
                 out_threshold=0.5):
-    net.eval()
-    img = torch.from_numpy(BasicDataset.preprocess(None, full_img, scale_factor, is_mask=False))
-    img = img.unsqueeze(0)
+    net.eval() #eval mode
+
+
+    img = torch.from_numpy(BasicDataset.preprocess(None, full_img, scale_factor, is_mask=False)) # reloads images to (C, H, W).
+    img = img.unsqueeze(0)                                                                       # unsqueeze(0) fakes a batch of size 1.
     img = img.to(device=device, dtype=torch.float32)
 
-    with torch.no_grad():
-        output = net(img).cpu()
-        output = F.interpolate(output, (full_img.size[1], full_img.size[0]), mode='bilinear')
+    with torch.no_grad():                       #disable gradient tracking 
+        output = net(img).cpu()                 #producing raw logits of shape (1, n_classes, h_scaled, w_scaled)
+        output = F.interpolate(output, (full_img.size[1], full_img.size[0]), mode='bilinear') #Resizes the output mask back up to the original image size.
         if net.n_classes > 1:
             mask = output.argmax(dim=1)
         else:
             mask = torch.sigmoid(output) > out_threshold
 
-    return mask[0].long().squeeze().numpy()
+        mask = mask[0]          # drop batch dim: (1, C, H, W) -> (C, H, W)
+        mask = mask.long()      # cast bool/index values to integers
+        mask = mask.squeeze()   # drop any leftover size-1 dims: (1, H, W) -> (H, W)
+        mask = mask.numpy()     # convert tensor -> plain numpy array
+        return mask
 
 
 def get_args():
@@ -39,9 +45,6 @@ def get_args():
                         help='Specify the file in which the model is stored')
     parser.add_argument('--input', '-i', metavar='INPUT', nargs='+', help='Filenames of input images', required=True)
     parser.add_argument('--output', '-o', metavar='OUTPUT', nargs='+', help='Filenames of output images')
-    parser.add_argument('--viz', '-v', action='store_true',
-                        help='Visualize the images as they are processed')
-    parser.add_argument('--no-save', '-n', action='store_true', help='Do not save the output masks')
     parser.add_argument('--mask-threshold', '-t', type=float, default=0.5,
                         help='Minimum probability value to consider a mask pixel white')
     parser.add_argument('--scale', '-s', type=float, default=0.5,
@@ -54,25 +57,18 @@ def get_args():
 
 def get_output_filenames(args):
     def _generate_name(fn):
-        return f'{os.path.splitext(fn)[0]}_OUT.png'
+        name = os.path.splitext(os.path.basename(fn))[0]
+        return f'Predictions/raw/{name}.png'
 
-    return args.output or list(map(_generate_name, args.input))
+    if args.output:
+        return args.output
+    os.makedirs('Predictions/raw', exist_ok=True)
+    return list(map(_generate_name, args.input))
 
 
-def mask_to_image(mask: np.ndarray, mask_values):
-    if isinstance(mask_values[0], list):
-        out = np.zeros((mask.shape[-2], mask.shape[-1], len(mask_values[0])), dtype=np.uint8)
-    elif mask_values == [0, 1]:
-        out = np.zeros((mask.shape[-2], mask.shape[-1]), dtype=bool)
-    else:
-        out = np.zeros((mask.shape[-2], mask.shape[-1]), dtype=np.uint8)
-
-    if mask.ndim == 3:
-        mask = np.argmax(mask, axis=0)
-
-    for i, v in enumerate(mask_values):
-        out[mask == i] = v
-
+def mask_to_image(mask: np.ndarray) -> Image.Image:
+    out = np.zeros((*mask.shape, 3), dtype=np.uint8)
+    out[mask.astype(bool)] = (57, 255, 20)  # neon green, matches ground-truth mask color
     return Image.fromarray(out)
 
 
@@ -91,7 +87,7 @@ if __name__ == '__main__':
 
     net.to(device=device)
     state_dict = torch.load(args.model, map_location=device)
-    mask_values = state_dict.pop('mask_values', [0, 1])
+    state_dict.pop('mask_values', None)  # not a real weight, strip before loading
     net.load_state_dict(state_dict)
 
     logging.info('Model loaded!')
@@ -106,12 +102,7 @@ if __name__ == '__main__':
                            out_threshold=args.mask_threshold,
                            device=device)
 
-        if not args.no_save:
-            out_filename = out_files[i]
-            result = mask_to_image(mask, mask_values)
-            result.save(out_filename)
-            logging.info(f'Mask saved to {out_filename}')
-
-        if args.viz:
-            logging.info(f'Visualizing results for image {filename}, close to continue...')
-            plot_img_and_mask(img, mask)
+        out_filename = out_files[i]
+        result = mask_to_image(mask)
+        result.save(out_filename)
+        logging.info(f'Mask saved to {out_filename}')

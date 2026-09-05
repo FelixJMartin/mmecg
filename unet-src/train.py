@@ -14,12 +14,13 @@ from tqdm import tqdm
 import wandb
 from evaluate import evaluate
 from unet import UNet
-from utils.data_loading import BasicDataset, CarvanaDataset, GroupedBatchSampler
+from utils.data_loading import BasicDataset, CarvanaDataset
 from utils.dice_score import dice_loss
 
-dir_img = Path('./data/mixed_imgs/')
-dir_mask = Path('./data/mixed_masks/')
+dir_img = Path('./data/imgs/')
+dir_mask = Path('./data/masks/')
 dir_checkpoint = Path('./checkpoints/')
+
 
 
 def train_model(
@@ -48,11 +49,9 @@ def train_model(
     train_set, val_set = random_split(dataset, [n_train, n_val], generator=torch.Generator().manual_seed(0))
 
     # 3. Create data loaders
-    # batch_sampler (not batch_size/shuffle) so batches never mix differently-sized
-    # images from different templates -- see GroupedBatchSampler.
-    loader_args = dict(num_workers=os.cpu_count(), pin_memory=True)
-    train_loader = DataLoader(train_set, batch_sampler=GroupedBatchSampler(train_set, batch_size, shuffle=True), **loader_args)
-    val_loader = DataLoader(val_set, batch_sampler=GroupedBatchSampler(val_set, batch_size, shuffle=False, drop_last=True), **loader_args)
+    loader_args = dict(batch_size=batch_size, num_workers=os.cpu_count(), pin_memory=True)
+    train_loader = DataLoader(train_set, shuffle=True, **loader_args)
+    val_loader = DataLoader(val_set, shuffle=False, drop_last=True, **loader_args)
 
     # (Initialize logging)
     experiment = wandb.init(project='U-Net', resume='allow', anonymous='must')

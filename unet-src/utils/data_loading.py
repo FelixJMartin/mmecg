@@ -13,7 +13,7 @@ from torch.utils.data import Dataset, Sampler, Subset
 from tqdm import tqdm
 
 
-# make_mask.py only ever writes .png files, so no .npy/.pt handling needed here.
+# make_dataset.py only ever writes .png files, so no .npy/.pt handling needed here.
 def load_image(filename):
     return Image.open(filename)
 

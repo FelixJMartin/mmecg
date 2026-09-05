@@ -17,6 +17,7 @@ unet-src/data/test_index.csv
 
 # staging area for cluster uploads - regenerable, not meant to be committed
 cluster_upload/
+testing/
 
 # Python build/cache cruft
 __pycache__/

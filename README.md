@@ -15,14 +15,14 @@ U-Net architecture diagram, from the original paper: Olaf Ronneberger, Philipp F
 
 - `ptb-xl/` — PTB-XL dataset (metadata tracked; large waveform files `.h5`, `records100/`, `records500/` are gitignored, see [LICENSE.txt](ptb-xl/LICENSE.txt) for CC BY 4.0 attribution terms)
 - `ecg-preprocessing/` — preprocessing package for generating ECG plot images/masks from PTB-XL records
-- `pmecg/` — scratch scripts
+- `digitize/` — digitization pipeline scripts
 
 ## How it works
 
-**1. Input image.** `make_mask.py` renders an ECG plot from PTB-XL signal data via `pmecg`, styled like real ECG paper (grid, no calibration pulse/labels — see below for why). This is what the model receives as input.
+**1. Input image.** `make_dataset.py` renders an ECG plot from PTB-XL signal data via `pmecg`, styled like real ECG paper (grid, no calibration pulse/labels — see below for why). This is what the model receives as input.
 
 
-**2. Ground truth mask.** For the same signal, `make_mask.py` also renders a bare version (no grid/decoration, trace only) and converts it to a binary neon-on-black mask — this is the label the model is trained to predict. Calibration pulse and lead labels are deliberately excluded from the *input* image too (not just the mask), because otherwise the model would be shown shapes it's never told to classify as background, and would learn false positives on them.
+**2. Ground truth mask.** For the same signal, `make_dataset.py` also renders a bare version (no grid/decoration, trace only) and converts it to a binary neon-on-black mask — this is the label the model is trained to predict. Calibration pulse and lead labels are deliberately excluded from the *input* image too (not just the mask), because otherwise the model would be shown shapes it's never told to classify as background, and would learn false positives on them.
 
 <p align="center">
   <img src="readme_assets/mask_example.png" alt="ground truth mask" width="600">
@@ -40,7 +40,7 @@ Loss and validation Dice per epoch for this run (`unet-src/training_log.csv`) �
   <img src="readme_assets/training_curve.png" alt="training curve" width="600">
 </p>
 
-**4. Replotting + density check.** `pmecg/replot_prediction.py` takes a predicted mask, extracts a rough signal back out of it (per-column trace centroid, gaps left as gaps — no interpolation across what the model didn't predict), and re-renders it through `pmecg` in the same styled format as the original input. It also plots a row-density histogram alongside the image: for each row, how many trace pixels the prediction has. This produces 3 distinct peaks (one per lead) separated by valleys, which is what future work will use to automatically split a 3-lead plot into 3 separate per-lead images.
+**4. Replotting + density check.** `digitize/raw_prediction_density.py` takes a predicted mask, extracts a rough signal back out of it (per-column trace centroid, gaps left as gaps — no interpolation across what the model didn't predict), and re-renders it through `pmecg` in the same styled format as the original input. It also plots a row-density histogram alongside the image: for each row, how many trace pixels the prediction has. This produces 3 distinct peaks (one per lead) separated by valleys, which is what future work will use to automatically split a 3-lead plot into 3 separate per-lead images.
 
 <p align="center">
   <img src="Predictions/replotted/example_1030_epoch5_density.png" alt="replotted with density" width="600">
@@ -54,10 +54,10 @@ Loss and validation Dice per epoch for this run (`unet-src/training_log.csv`) �
 
 ## Where things are
 
-- `make_mask.py` — generates (image, mask) training pairs from `ptb-xl/ptb_preprocessed.h5` into `unet-src/data/imgs`/`data/masks` (and a held-out set into `data/test_imgs`/`data/test_masks`)
+- `make_dataset.py` — generates (image, mask) training pairs from `ptb-xl/ptb_preprocessed.h5` into `unet-src/data/mixed_imgs`/`mixed_masks` (records 0-999) and a held-out set into `mixed_test_imgs`/`mixed_test_masks` (records 1000-1099), with a random layout template per record logged to `dataset_index.csv`/`test_index.csv`
 - `unet-src/train.py` — trains the model, saves checkpoints to `unet-src/checkpoints/` and a per-epoch log to `unet-src/training_log.csv`
 - `unet-src/predict.py` — runs a trained checkpoint on an input image, saves the predicted mask
-- `pmecg/replot_prediction.py` — takes a predicted mask, reconstructs a signal, replots it via `pmecg`, and adds the row-density histogram; reads from `Predictions/raw/`, outputs to `Predictions/replotted/`
+- `digitize/raw_prediction_density.py` — takes a predicted mask, reconstructs a signal, replots it via `pmecg`, and adds the row-density histogram; reads from `Predictions/raw/`, outputs to `Predictions/replotted/`
 - `comparisons/compare_overlay.py` — overlays a raw predicted mask against truth (agree/disagree diff), outputs to `comparisons/`
 - `comparisons/compare_epochs.py` — overlays all 5 epochs' disagreement with truth in one image, outputs to `comparisons/`
 
