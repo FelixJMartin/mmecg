@@ -34,16 +34,22 @@ def train_model(
         save_checkpoint: bool = True,
         img_scale: float = 0.5,
         amp: bool = False,
+        num_workers: int = None,
         weight_decay: float = 1e-8,
         momentum: float = 0.999,
         gradient_clipping: float = 1.0,
 ):
     # 1. Create dataset
     try:
-        dataset = CarvanaDataset(dir_img, dir_mask, img_scale)
+        dataset = CarvanaDataset(dir_img, dir_mask, img_scale,
+                                 index_csv=dir_index if model.n_layouts else None)
     except (AssertionError, RuntimeError, IndexError):
         dataset = BasicDataset(dir_img, dir_mask, img_scale,
                                index_csv=dir_index if model.n_layouts else None)
+
+    # Guard: --layouts asked for the head, so the labels must actually be present.
+    # Without this a mis-wired dataset silently trains with no classification signal.
+    assert not model.n_layouts or dataset.templates is not None,         'layout head enabled but dataset has no template labels (index_csv not applied)'
 
     # 2. Split into train / validation partitions
     n_val = int(len(dataset) * val_percent)
@@ -51,7 +57,10 @@ def train_model(
     train_set, val_set = random_split(dataset, [n_train, n_val], generator=torch.Generator().manual_seed(0))
 
     # 3. Create data loaders
-    loader_args = dict(batch_size=batch_size, num_workers=os.cpu_count(), pin_memory=True)
+    # On Windows each DataLoader worker is a full process copy; with full-page ECG images
+    # os.cpu_count() workers can exhaust RAM. 0 = load in the main process.
+    workers = os.cpu_count() if num_workers is None else num_workers
+    loader_args = dict(batch_size=batch_size, num_workers=workers, pin_memory=True)
     train_loader = DataLoader(train_set, shuffle=True, **loader_args)
     val_loader = DataLoader(val_set, shuffle=False, drop_last=True, **loader_args)
 
@@ -203,6 +212,8 @@ def get_args():
     parser.add_argument('--amp', action='store_true', default=False, help='Use mixed precision')
     parser.add_argument('--bilinear', action='store_true', default=False, help='Use bilinear upsampling')
     parser.add_argument('--classes', '-c', type=int, default=2, help='Number of classes')
+    parser.add_argument('--workers', type=int, default=None,
+                        help='DataLoader workers (default: os.cpu_count(); use 0 on low-RAM machines)')
     parser.add_argument('--layouts', type=int, default=None,
                         help='Number of layout templates (3) to enable the detached layout head. '
                              'Omit for segmentation only.')
@@ -245,7 +256,8 @@ if __name__ == '__main__':
             device=device,
             img_scale=args.scale,
             val_percent=args.val / 100,
-            amp=args.amp
+            amp=args.amp,
+            num_workers=args.workers
         )
     except torch.cuda.OutOfMemoryError:
         logging.error('Detected OutOfMemoryError! '

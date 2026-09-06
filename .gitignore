@@ -41,3 +41,4 @@ old_dataset/
 layout_preview/
 unet-src/checkpoints_old_geometry/
 
+unet-src/training_log.csv
