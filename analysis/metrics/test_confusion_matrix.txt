@@ -1,0 +1,13 @@
+Layout confusion matrix  (n=50)
+
+             predicted
+               1x12     2x6   4x3+1
+true 1x12        19       0       0
+     2x6          0      18       0
+     4x3+1        0       0      13
+
+accuracy: 50/50 = 1.0000
+
+mean dice      overall=0.8501   1x12=0.8574  2x6=0.8471  4x3+1=0.8437
+mean precision overall=0.8674   1x12=0.8773  2x6=0.8638  4x3+1=0.8580
+mean recall    overall=0.8336   1x12=0.8384  2x6=0.8311  4x3+1=0.8299

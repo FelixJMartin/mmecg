@@ -95,12 +95,12 @@ def train_model(
 
     log_path = Path('training_log.csv')
     with open(log_path, 'w', newline='') as f:
-        csv.writer(f).writerow(['epoch', 'loss', 'dice', 'layout_acc'])
+        csv.writer(f).writerow(['epoch', 'loss', 'seg_ce', 'seg_dice', 'cls_ce', 'dice', 'layout_acc'])
 
     # 5. Begin training
     for epoch in range(1, epochs + 1):
         model.train()
-        epoch_loss = 0
+        epoch_loss = epoch_seg_ce = epoch_seg_dice = epoch_cls_ce = 0
         with tqdm(total=n_train, desc=f'Epoch {epoch}/{epochs}', unit='img') as pbar:
             for batch in train_loader:
                 images, true_masks = batch['image'], batch['mask']
@@ -117,20 +117,27 @@ def train_model(
                 with torch.autocast(device.type if device.type != 'mps' else 'cpu', enabled=amp):
                     out = model(images)
                     masks_pred, cls_pred = out if model.n_layouts else (out, None)
+                    # Kept as three named terms so each can be logged separately: the
+                    # layout CE is ~100x the segmentation terms, so a single total hides
+                    # whether segmentation is converging at all.
                     if model.n_classes == 1:
-                        loss = criterion(masks_pred.squeeze(1), true_masks.float())
-                        loss += dice_loss(F.sigmoid(masks_pred.squeeze(1)), true_masks.float(), multiclass=False)
+                        seg_ce = criterion(masks_pred.squeeze(1), true_masks.float())
+                        seg_dice = dice_loss(F.sigmoid(masks_pred.squeeze(1)), true_masks.float(),
+                                             multiclass=False)
                     else:
-                        loss = criterion(masks_pred, true_masks)
-                        loss += dice_loss(
+                        seg_ce = criterion(masks_pred, true_masks)
+                        seg_dice = dice_loss(
                             F.softmax(masks_pred, dim=1).float(),
                             F.one_hot(true_masks, model.n_classes).permute(0, 3, 1, 2).float(),
                             multiclass=True
                         )
+                    loss = seg_ce + seg_dice
+                    cls_ce = None
                     if cls_pred is not None:
                         # Added un-weighted: the head is detached from the encoder, so this
                         # term only ever updates the head's own 3k params. It cannot move dice.
-                        loss = loss + cls_criterion(cls_pred, true_templates)
+                        cls_ce = cls_criterion(cls_pred, true_templates)
+                        loss = loss + cls_ce
 
                 optimizer.zero_grad(set_to_none=True)
                 grad_scaler.scale(loss).backward()
@@ -142,6 +149,9 @@ def train_model(
                 pbar.update(images.shape[0])
                 global_step += 1
                 epoch_loss += loss.item()
+                epoch_seg_ce += seg_ce.item()
+                epoch_seg_dice += seg_dice.item()
+                epoch_cls_ce += cls_ce.item() if cls_ce is not None else 0.0
                 experiment.log({
                     'train loss': loss.item(),
                     'step': global_step,
@@ -182,10 +192,14 @@ def train_model(
                         except:
                             pass
 
-        avg_loss = epoch_loss / len(train_loader)
+        n_batches = len(train_loader)
+        avg_loss = epoch_loss / n_batches
+        avg_seg_ce, avg_seg_dice = epoch_seg_ce / n_batches, epoch_seg_dice / n_batches
+        avg_cls_ce = epoch_cls_ce / n_batches
         epoch_dice, epoch_acc, epoch_cm = evaluate(model, val_loader, device, amp)
         with open(log_path, 'a', newline='') as f:
-            csv.writer(f).writerow([epoch, avg_loss, float(epoch_dice), epoch_acc])
+            csv.writer(f).writerow([epoch, avg_loss, avg_seg_ce, avg_seg_dice, avg_cls_ce,
+                                    float(epoch_dice), epoch_acc])
         logging.info(f'epoch {epoch}: loss={avg_loss:.5f} dice={float(epoch_dice):.4f} '
                      f'layout_acc={"n/a" if epoch_acc is None else f"{epoch_acc:.4f}"}')
         if epoch_cm is not None:

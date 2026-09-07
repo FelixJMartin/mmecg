@@ -53,78 +53,79 @@ def predict_img(net,
         return mask, layout
 
 
-def score_dataset(net, device, img_dir, mask_dir, index_csv, limit=None,
-                  scale=0.5, out_dir=None, mask_suffix='_mask', score_csv=None, tag='pred'):
-    """Predict every test image, score it against its ground-truth mask, print a table.
+def overlap_scores(pred, gt):
+    """Dice, precision and recall for two boolean masks."""
+    hit = (pred & gt).sum()
+    return (2 * hit / max(pred.sum() + gt.sum(), 1),   # dice
+            hit / max(pred.sum(), 1),                  # precision: how much of the prediction is real
+            hit / max(gt.sum(), 1))                    # recall: how much of the truth we found
 
-    Reports the numbers that matter together: segmentation quality (dice, and
-    precision/recall separately -- dice alone hides whether the model over- or
-    under-predicts) and layout accuracy with its softmax confidence.
+
+def save_mask(pred, path):
+    """Write a boolean mask as neon-on-black, the same format make_dataset.py uses."""
+    rgb = np.zeros((*pred.shape, 3), np.uint8)
+    rgb[pred] = (57, 255, 20)
+    Image.fromarray(rgb).save(path)
+
+
+def score_dataset(net, device, img_dir, mask_dir, index_csv, limit=None,
+                  scale=0.5, out_dir=None, score_csv=None, tag='pred'):
+    """Predict every test image, score it against its mask, print a table and write a CSV.
+
+    Precision and recall are reported next to dice because dice alone hides
+    whether the model over- or under-predicts.
     """
     truth = {}
     if index_csv and os.path.exists(index_csv):
         with open(index_csv) as f:
-            truth = {row['name']: row['template'] for row in csv.DictReader(f)}
+            truth = {r['name']: r['template'] for r in csv.DictReader(f)}
 
-    names = sorted((splitext(f)[0] for f in listdir(img_dir) if not f.startswith('.')),
-                   key=lambda n: (len(n), n))          # example_9 before example_10
-    if limit:
-        names = names[:limit]
+    # sort by (length, name) so example_9 comes before example_10
+    names = sorted((splitext(f)[0] for f in listdir(img_dir)), key=lambda n: (len(n), n))[:limit]
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
-    print(f"{'record':12s} {'true':7s} {'pred':7s} {'conf':>6s} "
-          f"{'dice':>7s} {'prec':>7s} {'rec':>7s}")
-    rows, records = [], []
+    print(f"{'record':12s} {'true':7s} {'pred':7s} {'conf':>6s} {'dice':>7s} {'prec':>7s} {'rec':>7s}")
+    results = []
     for name in names:
-        img = Image.open(join(img_dir, name + '.png'))
-        pred, layout = predict_img(net=net, full_img=img, scale_factor=scale, device=device)
+        image = Image.open(join(img_dir, name + '.png'))
+        pred, layout = predict_img(net=net, full_img=image, scale_factor=scale, device=device)
         pred = pred.astype(bool)
-
-        gt_path = join(mask_dir, name + mask_suffix + '.png')
-        gt = (np.asarray(Image.open(gt_path).convert('RGB')) != 0).any(-1)
-        inter = (pred & gt).sum()
-        dice = 2 * inter / max(pred.sum() + gt.sum(), 1)
-        prec = inter / max(pred.sum(), 1)
-        rec = inter / max(gt.sum(), 1)
+        gt = (np.asarray(Image.open(join(mask_dir, name + '_mask.png')).convert('RGB')) != 0).any(-1)
+        dice, precision, recall = overlap_scores(pred, gt)
 
         if out_dir:
-            out = np.zeros((*pred.shape, 3), np.uint8)
-            out[pred] = (57, 255, 20)                  # neon on black, same as make_dataset.py
-            # tag = the checkpoint that produced this, so masks from different
-            # checkpoints/ablations never collide or become unattributable
-            Image.fromarray(out).save(join(out_dir, f'{name}_{tag}.png'))
+            # tag names the checkpoint, so masks from different runs never collide
+            save_mask(pred, join(out_dir, f'{name}_{tag}.png'))
 
-        t = truth.get(name, '?')
-        pl, conf = layout if layout else ('n/a', float('nan'))
-        ok = 'OK ' if pl == t else 'MISS'
-        print(f"{name:12s} {t:7s} {pl:7s} {conf:6.3f} {dice:7.4f} {prec:7.4f} {rec:7.4f}  {ok}")
-        rows.append((dice, prec, rec, pl == t))
-        records.append({'record': name, 'true_layout': t, 'pred_layout': pl,
-                        'confidence': round(conf, 4), 'dice': round(float(dice), 4),
-                        'precision': round(float(prec), 4), 'recall': round(float(rec), 4),
-                        'layout_correct': int(pl == t)})
+        true_layout = truth.get(name, '?')
+        pred_layout, confidence = layout or ('n/a', float('nan'))
+        results.append(dict(record=name, true_layout=true_layout, pred_layout=pred_layout,
+                            confidence=round(confidence, 4), dice=round(dice, 4),
+                            precision=round(precision, 4), recall=round(recall, 4),
+                            layout_correct=int(pred_layout == true_layout)))
+        print(f"{name:12s} {true_layout:7s} {pred_layout:7s} {confidence:6.3f} "
+              f"{dice:7.4f} {precision:7.4f} {recall:7.4f}  "
+              f"{'OK ' if pred_layout == true_layout else 'MISS'}")
 
-    if rows:
-        m = [float(np.mean([r[i] for r in rows])) for i in range(4)]
-        print()
-        print(f"MEAN over {len(rows)}: dice={m[0]:.4f}  precision={m[1]:.4f}  "
-              f"recall={m[2]:.4f}  layout_acc={m[3]:.3f}")
+    if not results:
+        return results
 
-        # Default the report next to the saved masks, so predictions and their
-        # labels/scores end up in one folder rather than drifting apart.
-        path = score_csv or (join(out_dir, 'score_report.csv') if out_dir else 'score_report.csv')
-        os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
-        with open(path, 'w', newline='') as f:
-            w = csv.DictWriter(f, fieldnames=list(records[0].keys()))
-            w.writeheader()
-            w.writerows(records)
-            w.writerow({'record': 'MEAN', 'true_layout': '', 'pred_layout': '',
-                        'confidence': '', 'dice': round(m[0], 4),
-                        'precision': round(m[1], 4), 'recall': round(m[2], 4),
-                        'layout_correct': round(m[3], 4)})
-        print(f'wrote {path}')
-    return rows
+    mean = {k: round(float(np.mean([r[k] for r in results])), 4)
+            for k in ('dice', 'precision', 'recall', 'layout_correct')}
+    print()
+    print(f"MEAN over {len(results)}: dice={mean['dice']}  precision={mean['precision']}  "
+          f"recall={mean['recall']}  layout_acc={mean['layout_correct']}")
+
+    # the report lands next to the masks, so a prediction folder describes itself
+    path = score_csv or join(out_dir or '.', 'score_report.csv')
+    with open(path, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=list(results[0]))
+        writer.writeheader()
+        writer.writerows(results)
+        writer.writerow({'record': 'MEAN', **mean})
+    print(f'wrote {path}')
+    return results
 
 
 def get_args():

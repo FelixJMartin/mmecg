@@ -8,6 +8,7 @@ density mark where leads/labels/artifacts cluster vertically, which is a
 first, cheap way to eyeball where lead rows might be separable without
 needing a full tlbr_boxes layout.
 """
+import argparse
 import csv
 import glob
 import os
@@ -22,6 +23,15 @@ INDEX_CSVS = [
     "dataset_index.csv", "test_index.csv",
     "unet-src/data/dataset_index.csv", "unet-src/data/test_index.csv",
 ]
+
+
+def load_predicted_lookup(report_csv):
+    '''record name -> layout PREDICTED by the model, from predict.py --score's
+    score_report.csv. This is what closes the loop: n_rows no longer comes from
+    the ground-truth index CSV ("stealing from truth"), it comes from the net.'''
+    with open(report_csv) as f:
+        return {row["record"]: row["pred_layout"] for row in csv.DictReader(f)
+                if row["record"] != "MEAN" and row["pred_layout"] not in ("", "n/a")}
 
 
 def load_template_lookup():
@@ -111,9 +121,22 @@ def density_plot(pred_path, out_dir, template=None):
 
 
 if __name__ == "__main__":
-    template_lookup = load_template_lookup()
-    for pred_path in sorted(glob.glob("Predictions/raw/*.png")):
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--pred-dir", default="Predictions/raw", help="directory of predicted masks")
+    ap.add_argument("--out-dir", default="Predictions/replotted", help="where to write density plots + boundary CSVs")
+    ap.add_argument("--report", default=None,
+                    help="score_report.csv from predict.py --score; use the model's PREDICTED "
+                         "layout for n_rows instead of the ground-truth index CSV")
+    args = ap.parse_args()
+
+    lookup = load_predicted_lookup(args.report) if args.report else load_template_lookup()
+    source = "predicted" if args.report else "ground truth"
+    print(f"layout source: {source}")
+    for pred_path in sorted(glob.glob(f"{args.pred_dir}/*.png")):
         pred_name = os.path.splitext(os.path.basename(pred_path))[0]
         record_name = pred_name.split("_epoch")[0]
-        template = template_lookup.get(record_name)
-        density_plot(pred_path, "Predictions/replotted", template=template)
+        template = lookup.get(record_name)
+        if template is None:
+            print(f"  skipping {pred_name}: no layout for {record_name}")
+            continue
+        density_plot(pred_path, args.out_dir, template=template)
