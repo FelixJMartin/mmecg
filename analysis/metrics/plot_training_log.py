@@ -17,7 +17,8 @@ import pandas as pd
 
 
 def plot_runs(csv_paths, out_path, labels=None):
-    labels = labels or [p.replace("/training_log.csv", "").split("/")[-1] for p in csv_paths]
+    # name each run after its directory (os.path, so a Windows backslash path works too)
+    labels = labels or [os.path.basename(os.path.dirname(p)) for p in csv_paths]
     fig, axes = plt.subplots(1, 3, figsize=(15, 4.5))
 
     # the three loss terms, when train.py logged them separately
@@ -55,8 +56,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("csv_paths", nargs="+", default=["training_log.csv"],
                         help="one or more training_log.csv files")
-    parser.add_argument("-o", "--out", default="analysis/curves.png",
-                        help="output image path (analysis/ holds these figures)")
+    parser.add_argument("-o", "--out", default="analysis/metrics/curves.png",
+                        help="output image path (analysis/metrics/ holds these figures)")
     parser.add_argument("-l", "--labels", nargs="+", default=None, help="legend label per run")
     args = parser.parse_args()
 

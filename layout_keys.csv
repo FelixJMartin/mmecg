@@ -1,0 +1,4 @@
+class_index,template,n_rows,n_boundaries
+0,1x12,12,13
+1,2x6,6,7
+2,4x3+1,4,5

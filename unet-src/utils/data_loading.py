@@ -34,6 +34,17 @@ def unique_mask_values(idx, mask_dir, mask_suffix):
 TEMPLATE_TO_IDX = {'1x12': 0, '2x6': 1, '4x3+1': 2}
 IDX_TO_TEMPLATE = {v: k for k, v in TEMPLATE_TO_IDX.items()}
 
+# layout_keys.csv at the repo root is the shared contract (the row splitter and the
+# analysis scripts read it). Kept hardcoded above rather than loaded from the CSV so
+# training cannot die on a missing file inside a queued cluster job -- but when the
+# file IS present, disagreeing with it is a bug worth failing on immediately.
+_KEYS_CSV = join(Path(__file__).resolve().parents[2], 'layout_keys.csv')
+if isfile(_KEYS_CSV):
+    with open(_KEYS_CSV) as _f:
+        _keys = {r['template']: int(r['class_index']) for r in csv.DictReader(_f)}
+    assert TEMPLATE_TO_IDX == _keys, \
+        f'TEMPLATE_TO_IDX {TEMPLATE_TO_IDX} disagrees with {_KEYS_CSV}: {_keys}'
+
 
 class BasicDataset(Dataset):
     def __init__(self, images_dir: str, mask_dir: str, scale: float = 1.0, mask_suffix: str = '',

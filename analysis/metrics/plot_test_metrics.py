@@ -4,7 +4,7 @@ Unlike the training curves (which are per-epoch), these are per-record on the
 held-out test set. Records are grouped by true layout, because a mean over all
 records hides whether one layout is systematically worse than the others.
 
-    python analysis/plot_test_metrics.py analysis/test_score_report.csv
+    python analysis/metrics/plot_test_metrics.py
 """
 import argparse
 import os
@@ -13,7 +13,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-LAYOUTS = ["1x12", "2x6", "4x3+1"]
+# Layout names in class-index order, from the shared contract at the repo root,
+# so this script cannot disagree with the model or the row splitter.
+KEYS_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "layout_keys.csv")
+LAYOUTS = pd.read_csv(KEYS_CSV).sort_values("class_index")["template"].tolist()
 
 
 def load(csv_path):
@@ -42,7 +45,7 @@ def plot_metrics(df, out_path):
                 data.append(vals)
                 labels.append(f"{metric[:4]}\n{layout}")
                 box_colors.append(colors[layout])
-    bp = ax_box.boxplot(data, labels=labels, patch_artist=True)
+    bp = ax_box.boxplot(data, tick_labels=labels, patch_artist=True)
     for patch, c in zip(bp["boxes"], box_colors):
         patch.set_facecolor(c)
         patch.set_alpha(0.5)
@@ -80,8 +83,8 @@ def confusion_text(df):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("csv_path", nargs="?", default="analysis/test_score_report.csv")
-    ap.add_argument("-o", "--out-dir", default="analysis")
+    ap.add_argument("csv_path", nargs="?", default="analysis/metrics/test_score_report.csv")
+    ap.add_argument("-o", "--out-dir", default="analysis/metrics")
     args = ap.parse_args()
 
     df = load(args.csv_path)

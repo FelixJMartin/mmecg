@@ -40,13 +40,15 @@ Loss and validation Dice per epoch for this run (`unet-src/training_log.csv`) �
   <img src="readme_assets/training_curve.png" alt="training curve" width="600">
 </p>
 
-**4. Replotting + density check.** `digitize/raw_prediction_density.py` takes a predicted mask, extracts a rough signal back out of it (per-column trace centroid, gaps left as gaps — no interpolation across what the model didn't predict), and re-renders it through `pmecg` in the same styled format as the original input. It also plots a row-density histogram alongside the image: for each row, how many trace pixels the prediction has. This produces 3 distinct peaks (one per lead) separated by valleys, which is what future work will use to automatically split a 3-lead plot into 3 separate per-lead images.
+**4. Digitizing.** `analysis/splits/rows.py` finds each lead's baseline as a peak in the mask's row-density profile (the baseline is flat, so it concentrates ink in one image row, unlike the near-vertical QRS) and cuts the page midway between neighbouring baselines, writing one PNG per row plus a peaks CSV. The row pitch is measured from the image by autocorrelation, so nothing assumes the paper's dpi or margins:
 
 <p align="center">
-  <img src="Predictions/replotted/example_1030_epoch5_density.png" alt="replotted with density" width="600">
+  <img src="analysis/splits/example_501_split.png" alt="row split" width="600">
 </p>
 
-**5. Comparing against truth.** `comparisons/compare_overlay.py` overlays the raw predicted mask directly against the truth image (blue = truth only, red = predicted only, purple = both agree) — this is more reliable than comparing against the replot, since `pmecg`'s renderer has a data-dependent rendering drift on dense signals (documented in `replot_prediction.py`) that the raw mask isn't subject to:
+`digitize/digitize_pieces.py` then vectorizes those pieces into millivolts, `digitize/replot_digitized.py` renders the result back onto ECG paper, and `digitize/compare_to_truth.py` scores it against the h5 signal the page was generated from — closing the loop image -> mask -> rows -> signal -> paper.
+
+**5. Comparing against truth.** `analysis/comparisons/compare_overlay.py` overlays the raw predicted mask directly against the truth image (blue = truth only, red = predicted only, purple = both agree) — this is more reliable than comparing against the replot, since `pmecg`'s renderer has a data-dependent rendering drift on dense signals (documented in `replot_prediction.py`) that the raw mask isn't subject to:
 
 <p align="center">
   <img src="readme_assets/overlay_example.png" alt="overlay comparison" width="600">
@@ -57,9 +59,13 @@ Loss and validation Dice per epoch for this run (`unet-src/training_log.csv`) �
 - `make_dataset.py` — generates (image, mask) training pairs from `ptb-xl/ptb_preprocessed.h5` into `unet-src/data/imgs`/`masks` (records 0-499) and a held-out set into `test_imgs`/`test_masks` (records 500-549), with a random layout template per record logged to `dataset_index.csv`/`test_index.csv`
 - `unet-src/train.py` — trains the model, saves checkpoints to `unet-src/checkpoints/` and a per-epoch log to `unet-src/training_log.csv`
 - `unet-src/predict.py` — runs a trained checkpoint on an input image, saves the predicted mask
-- `digitize/raw_prediction_density.py` — takes a predicted mask, reconstructs a signal, replots it via `pmecg`, and adds the row-density histogram; reads from `Predictions/raw/`, outputs to `Predictions/replotted/`
-- `comparisons/compare_overlay.py` — overlays a raw predicted mask against truth (agree/disagree diff), outputs to `comparisons/`
-- `comparisons/compare_epochs.py` — overlays all 5 epochs' disagreement with truth in one image, outputs to `comparisons/`
+- `layout_keys.csv` — the shared layout contract (class index, template, rows, boundaries), read by `data_loading.py`, `rows.py` and the analysis scripts
+- `analysis/splits/rows.py` — finds lead baselines and cuts a predicted mask into per-row pieces; writes `Predictions/pieces/*_rowNN.png` and `analysis/splits/*_peaks.csv`
+- `digitize/digitize_pieces.py` — vectorizes the row pieces into mV signals, into `Predictions/final/`
+- `digitize/replot_digitized.py` — renders a digitized CSV back onto ECG paper via `pmecg`
+- `digitize/compare_to_truth.py` — scores a digitized CSV against the source h5 signal, into `Predictions/digitized_vs_truth/`
+- `analysis/comparisons/compare_overlay.py` — overlays a predicted mask against truth (agree/disagree diff)
+- `analysis/metrics/` — training curves, per-record test metrics, confusion matrix
 
 ## Setup
 
