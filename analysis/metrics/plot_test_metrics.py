@@ -1,11 +1,11 @@
-"""Summarise a test-set score_report.csv: per-record metric plots + confusion matrix.
-
-Unlike the training curves (which are per-epoch), these are per-record on the
-held-out test set. Records are grouped by true layout, because a mean over all
-records hides whether one layout is systematically worse than the others.
-
-    python analysis/metrics/plot_test_metrics.py
 """
+Summarise a test-set score_report.csv: per-record metric plots + confusion matrix.
+
+python analysis/metrics/plot_test_metrics.py
+
+Plots the test figures, takes from CSV FILE.
+
+    """
 import argparse
 import os
 
@@ -13,30 +13,26 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-# Layout names in class-index order, from the shared contract at the repo root,
-# so this script cannot disagree with the model or the row splitter.
-KEYS_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "layout_keys.csv")
-LAYOUTS = pd.read_csv(KEYS_CSV).sort_values("class_index")["template"].tolist()
-
+LAYOUTS = ["1x12", "2x6", "4x3+1"]
 
 def load(csv_path):
     df = pd.read_csv(csv_path)
-    return df[df["record"] != "MEAN"].reset_index(drop=True)   # drop the summary row
+    return df[df["record"] != "MEAN"].reset_index(drop=True)   # drop the summary row at the end of the csv log
 
 
 def plot_metrics(df, out_path):
     """Left: each metric per record, coloured by layout. Right: distribution per layout."""
-    fig, (ax_rec, ax_box) = plt.subplots(1, 2, figsize=(15, 5))
+    fig, (ax_rec, ax_box) = plt.subplots(1, 2, figsize=(15, 5))             
 
-    colors = dict(zip(LAYOUTS, ["tab:blue", "tab:orange", "tab:green"]))
-    for metric, marker in (("dice", "o"), ("precision", "s"), ("recall", "^")):
-        ax_rec.plot(range(len(df)), df[metric], marker=marker, ms=3, lw=1, label=metric)
+    colors = dict(zip(LAYOUTS, ["tab:blue", "tab:orange", "tab:green"]))              #zip the layouts against the colours
+    for metric, marker in (("dice", "o"), ("precision", "s"), ("recall", "^")):       #runs metric, marker 3 times
+        ax_rec.plot(range(len(df)), df[metric], marker=marker, ms=3, lw=1, label=metric)    #so per row in the test_score, take the metric, assert marker, style and label
     ax_rec.set(xlabel="test record (in order)", ylabel="score",
                title="Per-record segmentation metrics", ylim=(0, 1))
     ax_rec.grid(alpha=0.3)
-    ax_rec.legend(fontsize=8)
+    ax_rec.legend(fontsize=8)                                                         
 
-    # one box per layout per metric, so a weak layout stands out
+    # one box per layout per metric
     data, labels, box_colors = [], [], []
     for metric in ("dice", "precision", "recall"):
         for layout in LAYOUTS:
@@ -45,7 +41,7 @@ def plot_metrics(df, out_path):
                 data.append(vals)
                 labels.append(f"{metric[:4]}\n{layout}")
                 box_colors.append(colors[layout])
-    bp = ax_box.boxplot(data, tick_labels=labels, patch_artist=True)
+    bp = ax_box.boxplot(data, labels=labels, patch_artist=True)
     for patch, c in zip(bp["boxes"], box_colors):
         patch.set_facecolor(c)
         patch.set_alpha(0.5)
@@ -83,7 +79,7 @@ def confusion_text(df):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("csv_path", nargs="?", default="analysis/metrics/test_score_report.csv")
+    ap.add_argument("csv_path", nargs="?", default="Predictions/test_score_report.csv")
     ap.add_argument("-o", "--out-dir", default="analysis/metrics")
     args = ap.parse_args()
 

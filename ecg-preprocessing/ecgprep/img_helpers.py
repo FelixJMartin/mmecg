@@ -69,19 +69,32 @@ def signal_to_ecg(signal, pixels_per_mm_h, pixels_per_mm_w):
 
 def vectorize_single_lead(lead_img, mask):
     H, W = mask.shape[0], mask.shape[1]
-    signal_pixels = np.zeros(W)
+    signal_pixels = np.zeros(W)                         #vector of width length
 
-    #for the full width
-    for i in range(W):
-        #walk all rows, and just that colomn and see what the y value is. 
-        ys = np.nonzero(mask[:, i])[0]  # y-locations of the signal
+    for i in range(W):                                  #for all pixel in the length                                 
+        ys = np.nonzero(mask[:, i])[0]
+
+        # print(ys)                  #y-locations of the signal, the values which are nonzero in the 
+
+        # [205 206 207 208 209 210 211]   moving up
+        # [208 209 210 211]
+        # [209 210 211]                   ink width
+        # [209 210 211]
+
+
         if len(ys) > 0:
-            v = 255 - lead_img[ys, i] #darkness score
-            signal_pixels[i] = H - np.mean(ys[v==max(v)])  # take mean pixel coordinate 
+            v = 255 - lead_img[ys, i]                      #darkness score
+            signal_pixels[i] = H - np.mean(ys[v==max(v)])  # from height, eg 410, remove the index of most dark. and other one goes from top. so we subtract to get what pixel. so just a 
         # put it to nan if not larger than 0
         else:
             signal_pixels[i] = np.nan
-    # might be good to do something smarter to potentially remove some artifacts
+
+    #    example_501_row01.png  (410, 3318) mask  →  signal_pixels  (3318,)
+    #    example_501_row02.png  (408, 3318)       →  signal_pixels  (3318,)
+    #    example_501_row03.png  (410, 3318)       →  signal_pixels  (3318,)
+    #    example_501_row04.png  (411, 3318)       →  signal_pixels  (3318,)
+    #                                               ↓ signals.append each
+    #                                             matrix (4, 3318)
 
     return signal_pixels
 

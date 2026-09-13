@@ -1,38 +1,8 @@
 """Row geometry for ECG masks: find the lead baselines, then cut the page on them.
 
-
 Splits one record into per-row pieces, writing the peaks CSV and one PNG per row.
 
-        python analysis/splits/rows.py example_501
-
-Args:
-
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-
-    
-    ap.add_argument("record", help="which record to split, e.g. example_501")
-
-    
-    ap.add_argument("--mask-dir", default=PRED_MASKS[0])
-
-    
-    ap.add_argument("--suffix", default=PRED_MASKS[1], help="'_mask' for truth masks")
-
-    
-    ap.add_argument("--layouts-csv", default=PRED_LAYOUTS,
-                    help=f"pass {TRUTH_LAYOUTS} to use ground truth")
-
-    
-    ap.add_argument("--out-dir", default="Predictions/pieces", help="where row PNGs go")
-
-    
-    ap.add_argument("--peaks-dir", default="analysis/splits",
-                    help="where the peaks CSV and figure go")
-
-
-
-
+python analysis/splits/rows.py example_501 --help
 
 """
 import argparse
@@ -57,7 +27,7 @@ def load_layout_keys(csv_path=KEYS_CSV):
 N_ROWS = load_layout_keys()
 
 PRED_MASKS = ("Predictions/raw", "_epoch9")
-PRED_LAYOUTS = "analysis/metrics/test_score_report.csv"    # column: pred_layout
+PRED_LAYOUTS = "Predictions/test_score_report.csv"    # column: pred_layout
 
 TRUTH_MASKS = ("unet-src/data/test_masks", "_mask")
 TRUTH_LAYOUTS = "unet-src/data/test_index.csv"             # column: template
@@ -81,7 +51,7 @@ def row_density(mask_path):
     return counts
 
 
-def autocorr_pitch(density, n_rows):
+def autocorr_dist(density, n_rows):
     """
     Estimate the vertical distance between two lead baselines, in pixels.
     """
@@ -102,7 +72,7 @@ def autocorr_pitch(density, n_rows):
     return smallest + int(np.argmax(ac[smallest:largest]))
 
 
-def find_baselines(density, n_rows, pitch=None):
+def find_baselines(density, n_rows, dist=None):
     """
     Find the one baseline row belonging to each lead row, top to bottom.
     A baseline is a long horizontal line of ink, so it shows up as a peak in the
@@ -110,13 +80,13 @@ def find_baselines(density, n_rows, pitch=None):
 
     Returns (positions, heights). 
     """
-    # Fall back to canvas/n_rows only if no usable pitch was measured.
-    if pitch is None or not np.isfinite(pitch) or pitch <= 0:
-        pitch = len(density) / n_rows
+    # Fall back to canvas/n_rows only if no usable dist was measured.
+    if dist is None or not np.isfinite(dist) or dist <= 0:
+        dist = len(density) / n_rows
 
 
-    # Two peaks must sit at least ~60% of a pitch apart.
-    min_gap = 0.6 * pitch
+    # Two peaks must sit at least ~60% of a dist apart.
+    min_gap = 0.6 * dist
     peaks, _ = find_peaks(density.astype(float), distance=min_gap)
 
 
@@ -136,12 +106,12 @@ def find_baselines(density, n_rows, pitch=None):
     return peaks, heights    # baseline row indices, and the ink count at each
 
 
-def cut_rows(peaks, pitch):
+def cut_rows(peaks, dist):
     """Split the page into row bands.
 
     Args:
         peaks:  y-coordinates of the row separators.
-        pitch:  spacing between rows, in px (from autocorr_pitch).
+        dist:  spacing between rows, in px (from autocorr_dist).
     
     PIL / crop boxes are (x, y):
         (0, 0)      top left
@@ -153,31 +123,31 @@ def cut_rows(peaks, pitch):
     height = len(density)
     cuts = []
 
-    # top edge: half a pitch above the first baseline, clipped to the page
-    cuts.append(max(0, int(round(peaks[0] - pitch / 2))))
+    # top edge: half a dist above the first baseline, clipped to the page
+    cuts.append(max(0, int(round(peaks[0] - dist / 2))))
 
     # between each pair of neighbouring baselines, cut in the middle
     for lower, upper in zip(peaks[1:], peaks[:-1]):
         cuts.append(int(round((upper + lower) / 2)))
 
-    # bottom edge: half a pitch below the last baseline
-    cuts.append(min(height, int(round(peaks[-1] + pitch / 2))))
+    # bottom edge: half a dist below the last baseline
+    cuts.append(min(height, int(round(peaks[-1] + dist / 2))))
 
-    return np.array(cuts)                                           #returns a list of cuts, top is half a pitch above base, bottom is half a pitch below base
+    return np.array(cuts)                                           #returns a list of cuts, top is half a dist above base, bottom is half a dist below base
 
 
 def measure(mask_path, n_rows):
     """
-    (density, pitch, peaks, heights) for one mask - the whole geometry step.
+    (density, dist, peaks, heights) for one mask - the whole geometry step.
     A function calling other functions
     
     """
 
     density = row_density(mask_path)                               # Extract density profile
-    pitch = autocorr_pitch(density, n_rows)                        # Compute the pitch of the mask
-    peaks, heights = find_baselines(density, n_rows, pitch=pitch)  # Get the 2 arrays needed
+    dist = autocorr_dist(density, n_rows)                        # Compute the dist of the mask
+    peaks, heights = find_baselines(density, n_rows, dist=dist)  # Get the 2 arrays needed
 
-    return density, pitch, peaks, heights                          # Return all in a compact way
+    return density, dist, peaks, heights                          # Return all in a compact way
 
 
 # ---------------------------------------------------------------- drawing
@@ -284,8 +254,8 @@ def split(record, mask_dir, suffix, layouts_csv, out_dir, peaks_dir, plot_path):
 
     mask_path = os.path.join(mask_dir, record + suffix + ".png")
     img = Image.open(mask_path).convert("RGB")
-    density, pitch, peaks, heights = measure(mask_path, n_rows)
-    cuts = cut_rows(peaks, pitch)
+    density, dist, peaks, heights = measure(mask_path, n_rows)
+    cuts = cut_rows(peaks, dist)
 
     os.makedirs(out_dir, exist_ok=True)
     os.makedirs(peaks_dir, exist_ok=True)
@@ -297,7 +267,7 @@ def split(record, mask_dir, suffix, layouts_csv, out_dir, peaks_dir, plot_path):
 
 if __name__ == "__main__":
 
-    # Checking pitch and density functions ------------------------------------------
+    # Checking dist and density functions ------------------------------------------
     BASE = r"C:\Users\felix\Downloads\Research\U-net seg"
     RAW  = os.path.join(BASE, "Predictions", "raw")
     CUT_img = os.path.join(BASE, "Analysis", "splits")
@@ -305,28 +275,28 @@ if __name__ == "__main__":
     record = "example_501"                                      #choose img for testing
     mask_path = os.path.join(RAW, f"{record}_epoch9.png")
 
-    with open(os.path.join(RAW, "score_report.csv")) as f:
+    with open(os.path.join(BASE, PRED_LAYOUTS)) as f:
         layout = next(r["pred_layout"] for r in csv.DictReader(f) if r["record"] == record)
 
     n_rows = N_ROWS[layout]
     density = row_density(mask_path)
 
-    pitch = autocorr_pitch(density, n_rows)
-    print(f"pitch for this one is {pitch}")
+    dist = autocorr_dist(density, n_rows)
+    print(f"dist for this one is {dist}")
 
     # Testing find baselines --------------------------------------------------------
 
-    peaks, heights = find_baselines(density, n_rows, pitch)
+    peaks, heights = find_baselines(density, n_rows, dist)
     print(f"the peaks are located on rows: {peaks}")
     print(f"the height of these peaks are: {heights}")    
 
     # testing the cuts function -----------------------------------------------------
 
-    cuts = cut_rows(peaks, pitch)
+    cuts = cut_rows(peaks, dist)
     print(f"cuts will therefor be at these values: {cuts}")
 
     #testing the mesure function that calls all of them ----------------------------
-    # des, pitch, pek, heigh = measure(mask_path, n_rows)
+    # des, dist, pek, heigh = measure(mask_path, n_rows)
 
     #testing the plotting of the first part: ---------------------------------------
 
@@ -353,8 +323,8 @@ if __name__ == "__main__":
     ap.add_argument("--peaks-dir", default="analysis/splits",
                     help="where the peaks CSV and figure go")
 
-    # args = ap.parse_args()
+    args = ap.parse_args()
 
-    # plot = os.path.join(args.peaks_dir, f"{args.record}_split.png")
-    # split(args.record, args.mask_dir, args.suffix, args.layouts_csv,
-    #       args.out_dir, args.peaks_dir, plot)
+    plot = os.path.join(args.peaks_dir, f"{args.record}_split.png")
+    split(args.record, args.mask_dir, args.suffix, args.layouts_csv,
+          args.out_dir, args.peaks_dir, plot)
