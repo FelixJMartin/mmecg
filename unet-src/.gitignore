@@ -6,3 +6,10 @@ checkpoints/
 venv/
 .idea/
 wandb/
+
+# generated dataset: rebuild with data/make_multiclass.py
+data/imgs/
+data/labels/
+data/test_imgs/
+data/test_labels/
+data/*.csv
