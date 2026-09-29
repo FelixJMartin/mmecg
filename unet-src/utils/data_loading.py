@@ -1,5 +1,6 @@
 import csv
 import logging
+import random
 import numpy as np
 import torch
 from PIL import Image
@@ -38,7 +39,11 @@ IDX_TO_TEMPLATE = {v: k for k, v in TEMPLATE_TO_IDX.items()}
 # analysis scripts read it). Kept hardcoded above rather than loaded from the CSV so
 # training cannot die on a missing file inside a queued cluster job -- but when the
 # file IS present, disagreeing with it is a bug worth failing on immediately.
-_KEYS_CSV = join(Path(__file__).resolve().parents[2], 'layout_keys.csv')
+# Look next to train.py first (that copy ships with the cluster upload), then at the
+# project root for a local checkout. Missing file = check skipped, training still runs.
+_KEYS_CSV = next((p for p in (join(Path(__file__).resolve().parents[1], 'layout_keys.csv'),
+                              join(Path(__file__).resolve().parents[2], 'layout_keys.csv'))
+                  if isfile(p)), '')
 if isfile(_KEYS_CSV):
     with open(_KEYS_CSV) as _f:
         _keys = {r['template']: int(r['class_index']) for r in csv.DictReader(_f)}
@@ -156,7 +161,131 @@ class BasicDataset(Dataset):
             sample['template'] = torch.tensor(self.templates[name], dtype=torch.long)
         return sample
 
+    def load_raw(self, name):
+        '''Full-resolution (image, mask, template) for one id -- no resize, no crop.
+        Shared by CropView (random training crops) and PadView (full-page eval), so
+        both agree on the exact same class-index mapping (self.mask_values) as the
+        legacy whole-image __getitem__ above, computed once at dataset init.
+        '''
+        mask_file = list(self.mask_dir.glob(name + self.mask_suffix + '.*'))
+        img_file = list(self.images_dir.glob(name + '.*'))
+        assert len(img_file) == 1, f'Either no image or multiple images found for the ID {name}: {img_file}'
+        assert len(mask_file) == 1, f'Either no mask or multiple masks found for the ID {name}: {mask_file}'
+        mask_pil = load_image(mask_file[0])
+        img_pil = load_image(img_file[0])
+        assert img_pil.size == mask_pil.size, \
+            f'Image and mask {name} should be the same size, but are {img_pil.size} and {mask_pil.size}'
+
+        img = np.asarray(img_pil)
+        if img.ndim == 2:
+            img = img[np.newaxis, ...]
+        else:
+            img = img.transpose((2, 0, 1))
+        if (img > 1).any():
+            img = img / 255.0
+
+        raw = np.asarray(mask_pil)
+        mask = np.zeros(raw.shape[:2], dtype=np.int64)
+        for i, v in enumerate(self.mask_values):
+            if raw.ndim == 2:
+                mask[raw == v] = i
+            else:
+                mask[(raw == v).all(-1)] = i
+
+        template = self.templates[name] if self.templates is not None else None
+        return img.astype(np.float32), mask, template
+
 
 class CarvanaDataset(BasicDataset):
     def __init__(self, images_dir, mask_dir, scale=1, index_csv=None):
         super().__init__(images_dir, mask_dir, scale, mask_suffix='_mask', index_csv=index_csv)
+
+
+class CropView(Dataset):
+    '''Wraps a torch Subset of a BasicDataset/CarvanaDataset split (e.g. from
+    random_split) and draws full-resolution training crops instead of the base
+    dataset's whole-image resize. With probability fg_oversample, the crop is centred
+    on a random pixel of a randomly-chosen PRESENT class (not a random foreground
+    pixel directly -- that would over-sample whichever lead has the most pixels, e.g.
+    the rhythm strip / 1x12's long leads) instead of a uniform-random window. Per
+    nnU-Net's data_loader_2d.py convention (class first, then a pixel of that class).
+
+    Reuses the base dataset's already-scanned mask_values/templates (via
+    Subset.dataset), so this and PadView below never re-scan the mask directory and
+    always agree on the same class-index mapping.
+    '''
+    def __init__(self, subset, crop_size, fg_oversample: float = 0.0):
+        self.subset = subset
+        self.crop_h, self.crop_w = crop_size
+        self.fg_oversample = fg_oversample
+
+    def __len__(self):
+        return len(self.subset)
+
+    def __getitem__(self, i):
+        ds = self.subset.dataset
+        name = ds.ids[self.subset.indices[i]]
+        img, mask, template = ds.load_raw(name)
+        H, W = mask.shape
+        ch, cw = min(self.crop_h, H), min(self.crop_w, W)
+
+        top = left = None
+        if random.random() < self.fg_oversample:
+            classes = np.unique(mask)
+            classes = classes[classes != 0]
+            if len(classes):
+                cls = int(random.choice(classes.tolist()))
+                ys, xs = np.where(mask == cls)
+                j = random.randrange(len(ys))
+                cy, cx = int(ys[j]), int(xs[j])
+                top = min(max(cy - ch // 2, 0), H - ch)
+                left = min(max(cx - cw // 2, 0), W - cw)
+        if top is None:
+            top = random.randrange(H - ch + 1)
+            left = random.randrange(W - cw + 1)
+
+        img_c = img[:, top:top + ch, left:left + cw]
+        mask_c = mask[top:top + ch, left:left + cw]
+
+        sample = {
+            'image': torch.as_tensor(img_c.copy()).float().contiguous(),
+            'mask': torch.as_tensor(mask_c.copy()).long().contiguous(),
+        }
+        if template is not None:
+            sample['template'] = torch.tensor(template, dtype=torch.long)
+        return sample
+
+
+class PadView(Dataset):
+    '''Wraps a Subset, returning the FULL (uncropped) image/mask, padded on the
+    bottom/right to a multiple of pad_to so a fully-convolutional forward pass can run
+    in one shot at eval time (no sliding-window stitching). Also returns orig_size so
+    the caller can crop the network's output back before scoring -- otherwise the
+    padded rows/columns (arbitrary content, not real page) would pollute
+    trace_recall/precision/coverage/centre_rmse_mv.
+    '''
+    def __init__(self, subset, pad_to: int = 16):
+        self.subset = subset
+        self.pad_to = pad_to
+
+    def __len__(self):
+        return len(self.subset)
+
+    def __getitem__(self, i):
+        ds = self.subset.dataset
+        name = ds.ids[self.subset.indices[i]]
+        img, mask, template = ds.load_raw(name)
+        _, H, W = img.shape
+        ph, pw = (-H) % self.pad_to, (-W) % self.pad_to
+        if ph or pw:
+            img = np.pad(img, ((0, 0), (0, ph), (0, pw)))
+            mask = np.pad(mask, ((0, ph), (0, pw)))
+
+        sample = {
+            'image': torch.as_tensor(img.copy()).float().contiguous(),
+            'mask': torch.as_tensor(mask.copy()).long().contiguous(),
+            'orig_size': torch.tensor([H, W]),
+        }
+        if template is not None:
+            sample['template'] = torch.tensor(template, dtype=torch.long)
+        return sample

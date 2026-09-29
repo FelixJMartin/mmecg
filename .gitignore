@@ -4,7 +4,7 @@ ptb-xl/records100/
 ptb-xl/records500/
 
 # trained model weights - large, regenerable by rerunning train.py
-unet-src/checkpoints/
+models/
 
 # generated dataset is regenerable from ptb-xl/ptb_preprocessed.h5 via make_mask.py -
 # don't bloat the repo with it (README's demo images live in readme_assets/ instead)
@@ -19,12 +19,27 @@ unet-src/data/test_index.csv
 cluster_upload/
 testing/
 
-# Python build/cache cruft
-__pycache__/
-*.pyc
-*.egg-info/
-build/
-dist/
+
+# superseded pre-equal-canvas dataset, kept as a fallback (regenerable via unet-src/make_multiclass.py)
+old_dataset/
+layout_preview/
+unet-src/checkpoints_old_geometry/
+Predictions/
+
+unet-src/training_log.csv
+
+# real patient ECG scans - never commit
+harddrive/
+
+# run3 fold-10 test set + its predictions - regenerable on the cluster
+test-set/
+
+# real-photo pipeline (UVDoc -> Hough -> predict), incl. UVDoc's 32 MB weights
+real_photos/
+
+# preprocessing package (vectorize_single_lead etc.) - kept locally, not in this repo
+ecg-preprocessing/
+
 
 # local tooling / env state
 .claude/
@@ -36,9 +51,11 @@ venv/
 .deepeval/
 
 
-# superseded pre-equal-canvas dataset, kept as a fallback (regenerable via make_dataset.py)
-old_dataset/
-layout_preview/
-unet-src/checkpoints_old_geometry/
+# Python build/cache cruft
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
 
-unet-src/training_log.csv
+old/

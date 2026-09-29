@@ -61,11 +61,18 @@ def overlap_scores(pred, gt):
             hit / max(gt.sum(), 1))                    # recall: how much of the truth we found
 
 
-def save_mask(pred, path):
-    """Write a boolean mask as neon-on-black, the same format make_dataset.py uses."""
-    rgb = np.zeros((*pred.shape, 3), np.uint8)
-    rgb[pred] = (57, 255, 20)
-    Image.fromarray(rgb).save(path)
+def lead_dice(pred, gt, n_classes):
+    """Mean dice over the leads (1..n-1) in pred or gt: a pixel only counts if ink AND lead are right."""
+    scores = [overlap_scores(pred == c, gt == c)[0] for c in range(1, n_classes)
+              if (gt == c).any() or (pred == c).any()]
+    return float(np.mean(scores)) if scores else float('nan')
+
+
+def save_mask(pred, palette, path):
+    """Write class ids as a palette PNG, coloured like the truth labels."""
+    out = Image.fromarray(pred.astype(np.uint8), mode='P')
+    out.putpalette(palette)
+    out.save(path)
 
 
 def score_dataset(net, device, img_dir, mask_dir, index_csv, limit=None,
@@ -85,37 +92,40 @@ def score_dataset(net, device, img_dir, mask_dir, index_csv, limit=None,
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
-    print(f"{'record':12s} {'true':7s} {'pred':7s} {'conf':>6s} {'dice':>7s} {'prec':>7s} {'rec':>7s}")
+    print(f"{'record':12s} {'true':7s} {'pred':7s} {'conf':>6s} {'dice':>7s} {'prec':>7s} {'rec':>7s} {'lead':>7s}")
     results = []
     for name in names:
         image = Image.open(join(img_dir, name + '.png'))
         pred, layout = predict_img(net=net, full_img=image, scale_factor=scale, device=device)
-        pred = pred.astype(bool)
-        gt = (np.asarray(Image.open(join(mask_dir, name + '_mask.png')).convert('RGB')) != 0).any(-1)
-        dice, precision, recall = overlap_scores(pred, gt)
+        gt_img = Image.open(join(mask_dir, name + '.png'))    # palette PNG: pixel = class id 0..12
+        gt = np.asarray(gt_img)
+        # dice/prec/rec: any lead vs background. lead: per-lead dice, right ink AND right lead.
+        dice, precision, recall = overlap_scores(pred > 0, gt > 0)
+        ldice = lead_dice(pred, gt, net.n_classes)
 
         if out_dir:
             # tag names the checkpoint, so masks from different runs never collide
-            save_mask(pred, join(out_dir, f'{name}_{tag}.png'))
+            save_mask(pred, gt_img.getpalette(), join(out_dir, f'{name}_{tag}.png'))
 
         true_layout = truth.get(name, '?')
         pred_layout, confidence = layout or ('n/a', float('nan'))
         results.append(dict(record=name, true_layout=true_layout, pred_layout=pred_layout,
                             confidence=round(confidence, 4), dice=round(dice, 4),
                             precision=round(precision, 4), recall=round(recall, 4),
+                            lead_dice=round(ldice, 4),
                             layout_correct=int(pred_layout == true_layout)))
         print(f"{name:12s} {true_layout:7s} {pred_layout:7s} {confidence:6.3f} "
-              f"{dice:7.4f} {precision:7.4f} {recall:7.4f}  "
+              f"{dice:7.4f} {precision:7.4f} {recall:7.4f} {ldice:7.4f}  "
               f"{'OK ' if pred_layout == true_layout else 'MISS'}")
 
     if not results:
         return results
 
     mean = {k: round(float(np.mean([r[k] for r in results])), 4)
-            for k in ('dice', 'precision', 'recall', 'layout_correct')}
+            for k in ('dice', 'precision', 'recall', 'lead_dice', 'layout_correct')}
     print()
     print(f"MEAN over {len(results)}: dice={mean['dice']}  precision={mean['precision']}  "
-          f"recall={mean['recall']}  layout_acc={mean['layout_correct']}")
+          f"recall={mean['recall']}  lead_dice={mean['lead_dice']}  layout_acc={mean['layout_correct']}")
 
     # the report lands next to the masks, so a prediction folder describes itself
     path = score_csv or join(out_dir or '.', 'score_report.csv')
@@ -139,12 +149,12 @@ def get_args():
     parser.add_argument('--scale', '-s', type=float, default=0.5,
                         help='Scale factor for the input images')
     parser.add_argument('--bilinear', action='store_true', default=False, help='Use bilinear upsampling')
-    parser.add_argument('--classes', '-c', type=int, default=2, help='Number of classes')
+    parser.add_argument('--classes', '-c', type=int, default=13, help='Number of classes (13 = background + 12 leads)')
     parser.add_argument('--score', type=int, nargs='?', const=0, default=None,
                         help='Score mode: evaluate N test images against their masks and print '
                              'a dice/precision/recall/layout table (no value = all images)')
     parser.add_argument('--img-dir', default='data/test_imgs', help='Score mode: image directory')
-    parser.add_argument('--mask-dir', default='data/test_masks', help='Score mode: mask directory')
+    parser.add_argument('--mask-dir', default='data/test_labels', help='Score mode: label directory (class-id PNGs)')
     parser.add_argument('--index-csv', default='data/test_index.csv', help='Score mode: layout labels')
     parser.add_argument('--save-dir', default=None, help='Score mode: also write predicted masks here')
     parser.add_argument('--score-csv', default=None,

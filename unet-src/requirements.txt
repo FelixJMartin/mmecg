@@ -1,5 +1,13 @@
+# Training + inference (train.py, evaluate.py, predict.py)
+torch
 matplotlib==3.6.2
 numpy==1.23.5
 Pillow==9.3.0
 tqdm==4.64.1
 wandb==0.13.5
+
+# Only for make_dataset/make_multiclass.py, which builds the dataset locally from
+# ptb-xl/ptb_preprocessed.h5. Not needed on the cluster if data/ is uploaded with the code.
+# h5py
+# pandas
+# pmecg
