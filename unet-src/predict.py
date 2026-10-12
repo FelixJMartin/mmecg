@@ -1,232 +1,183 @@
+"""
+Run a trained U-Net checkpoint on ECG pages. Two modes:
+
+python predict.py -m runs/name/checkpoints/checkpoint_epoch40.pth -i page1.jpg page2.png
+    predict single pages; coloured masks go to Predictions/raw/<name>.png
+
+python predict.py -m runs/name/checkpoints/checkpoint_epoch40.pth --score [N]
+    predict the test set (first N images, or all), score each against its true mask,
+    print a table and write <save-dir>/score_report.csv (read by analysis/plot_test_metrics.py)
+"""
+#syntaxes for usage
 import argparse
 import csv
 import logging
-import os
-import sys
-from os import listdir
-from os.path import join, splitext
+from pathlib import Path
 
-# Imports
+#packages
 import numpy as np
 import torch
-import torch.nn.functional as F
 from PIL import Image
 
-from utils.data_loading import BasicDataset, IDX_TO_TEMPLATE
+#own code
 from unet import UNet
+from utils.data_loading import image_to_array, IDX_TO_TEMPLATE
 
-# Predict image using model, net= model, full img, device=cpu, threshold
-def predict_img(net,
-                full_img,
-                device,
-                scale_factor=1,
-                out_threshold=0.5):
-    net.eval() #eval mode
+#paths
+test_img, test_mask, test_index = Path('data/test_imgs'), Path('data/test_labels'), Path('data/test_index.csv')
+raw_dir = Path('Predictions/raw')              # single-page mode output
 
+# ---------------------------------------------------------------- fixed settings, must match train.py
+n_classes = 13            # background + 12 leads
+n_layouts = 4             # 1x12, 2x6, 4x3+1, 2x6+1
 
-    img = torch.from_numpy(BasicDataset.preprocess(None, full_img, scale_factor, is_mask=False)) # reloads images to (C, H, W).
-    img = img.unsqueeze(0)                                                                       # unsqueeze(0) fakes a batch of size 1.
-    img = img.to(device=device, dtype=torch.float32)
-
-    layout = None
-    with torch.no_grad():                       #disable gradient tracking 
-        output = net(img)                       #producing raw logits of shape (1, n_classes, h_scaled, w_scaled)
-        if getattr(net, 'n_layouts', None):
-            # net returns (segmentation, layout logits) once the layout head is enabled
-            output, cls_logits = output
-            probs = F.softmax(cls_logits.cpu()[0], dim=0)
-            idx = int(probs.argmax())
-            # softmax, not just argmax: the confidence is worth having downstream, where a
-            # confidently-wrong layout would silently mis-slice every lead row.
-            layout = (IDX_TO_TEMPLATE[idx], float(probs[idx]))
-        output = output.cpu()
-        output = F.interpolate(output, (full_img.size[1], full_img.size[0]), mode='bilinear') #Resizes the output mask back up to the original image size.
-        if net.n_classes > 1:
-            mask = output.argmax(dim=1)
-        else:
-            mask = torch.sigmoid(output) > out_threshold
-
-        mask = mask[0]          # drop batch dim: (1, C, H, W) -> (C, H, W)
-        mask = mask.long()      # cast bool/index values to integers
-        mask = mask.squeeze()   # drop any leftover size-1 dims: (1, H, W) -> (H, W)
-        mask = mask.numpy()     # convert tensor -> plain numpy array
-        return mask, layout
+# one colour per class, same as dataset_build/make_multiclass.py (copied: importing it pulls in h5py, pmecg, ...)
+palette = [(255, 255, 255),                                       # 0 background
+           (228, 26, 28), (55, 126, 184), (77, 175, 74),          # I, II, III
+           (152, 78, 163), (255, 127, 0), (166, 206, 27),         # aVR, aVL, aVF
+           (166, 86, 40), (247, 129, 191), (0, 206, 209),         # V1, V2, V3
+           (120, 120, 120), (0, 0, 255), (255, 0, 255)]           # V4, V5, V6
 
 
-def overlap_scores(pred, gt):
+# ---------------------------------------------------------------- step helpers
+def predict_page(net, image, device):
+    """One page in -> class mask (H, W) with values 0..12, and the layout as (name, confidence)."""
+    # PIL image -> tensor (1, 3, H, W), values 0..1; the 1 is a fake batch of one page
+    x = torch.from_numpy(image_to_array(image)).unsqueeze(0).to(device)
+
+    #  forward pass, no gradients needed
+    with torch.no_grad():
+        logits, layout_logits = net(x)
+
+    # every pixel gets the class with the highest score: (1, 13, H, W) -> (H, W)
+    mask = logits.argmax(dim=1)[0].cpu().numpy()
+
+    # 4. layout: softmax, not just argmax, so we also get a confidence.
+    probs = layout_logits[0].softmax(dim=0).cpu()
+    idx = int(probs.argmax())
+    return mask, (IDX_TO_TEMPLATE[idx], float(probs[idx]))
+
+
+def overlap_scores(pred, true):
     """Dice, precision and recall for two boolean masks."""
-    hit = (pred & gt).sum()
-    return (2 * hit / max(pred.sum() + gt.sum(), 1),   # dice
-            hit / max(pred.sum(), 1),                  # precision: how much of the prediction is real
-            hit / max(gt.sum(), 1))                    # recall: how much of the truth we found
+    hit = (pred & true).sum()
+    dice = 2 * hit / max(pred.sum() + true.sum(), 1)
+    precision = hit / max(pred.sum(), 1)       
+    recall = hit / max(true.sum(), 1)          
+    return dice, precision, recall
 
 
-def lead_dice(pred, gt, n_classes):
-    """Mean dice over the leads (1..n-1) in pred or gt: a pixel only counts if ink AND lead are right."""
-    scores = [overlap_scores(pred == c, gt == c)[0] for c in range(1, n_classes)
-              if (gt == c).any() or (pred == c).any()]
+def lead_dice(pred, true):
+    """Mean dice over the leads that appear in pred or true: a pixel only counts if ink AND lead are right."""
+    scores = []
+    for c in range(1, n_classes):              # 1..12, skip background
+        if (true == c).any() or (pred == c).any():
+            scores.append(overlap_scores(pred == c, true == c)[0])
     return float(np.mean(scores)) if scores else float('nan')
 
 
-def save_mask(pred, palette, path):
-    """Write class ids as a palette PNG, coloured like the truth labels."""
-    out = Image.fromarray(pred.astype(np.uint8), mode='P')
-    out.putpalette(palette)
+def save_mask(mask, path):
+    """Write class ids as a palette PNG: same numbers, but a viewer shows each lead in its own colour."""
+    out = Image.fromarray(mask.astype(np.uint8), mode='P')
+    out.putpalette([channel for colour in palette for channel in colour])
     out.save(path)
 
 
-def score_dataset(net, device, img_dir, mask_dir, index_csv, limit=None,
-                  scale=0.5, out_dir=None, score_csv=None, tag='pred'):
-    """Predict every test image, score it against its mask, print a table and write a CSV.
+# ---------------------------------------------------------------- score mode
+def score_test_set(net, device, limit, out_dir, tag):
+    """Predict every test page, score it against its true mask, print a table and write score_report.csv.
 
-    Precision and recall are reported next to dice because dice alone hides
-    whether the model over- or under-predicts.
+    Precision and recall sit next to dice because dice alone hides whether the model over- or under-predicts.
     """
-    truth = {}
-    if index_csv and os.path.exists(index_csv):
-        with open(index_csv) as f:
-            truth = {r['name']: r['template'] for r in csv.DictReader(f)}
+    # 1. page / layout / persona of every test image
+    with open(test_index) as f:
+        info = {r['name']: r for r in csv.DictReader(f)}
 
-    # sort by (length, name) so example_9 comes before example_10
-    names = sorted((splitext(f)[0] for f in listdir(img_dir)), key=lambda n: (len(n), n))[:limit]
-    if out_dir:
-        os.makedirs(out_dir, exist_ok=True)
+    # 2. which images: sorted by (length, name) so example_9 comes before example_10
+    names = sorted((p.stem for p in test_img.iterdir()), key=lambda n: (len(n), n))[:limit]
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"{'record':12s} {'true':7s} {'pred':7s} {'conf':>6s} {'dice':>7s} {'prec':>7s} {'rec':>7s} {'lead':>7s}")
-    results = []
+    print(f"{'record':24s} {'true':7s} {'pred':7s} {'conf':>6s} {'dice':>7s} {'prec':>7s} {'rec':>7s} {'lead':>7s}")
+    rows = []
     for name in names:
-        image = Image.open(join(img_dir, name + '.png'))
-        pred, layout = predict_img(net=net, full_img=image, scale_factor=scale, device=device)
-        gt_img = Image.open(join(mask_dir, name + '.png'))    # palette PNG: pixel = class id 0..12
-        gt = np.asarray(gt_img)
-        # dice/prec/rec: any lead vs background. lead: per-lead dice, right ink AND right lead.
-        dice, precision, recall = overlap_scores(pred > 0, gt > 0)
-        ldice = lead_dice(pred, gt, net.n_classes)
+        # 3a. predict
+        image = Image.open(next(test_img.glob(name + '.*'))).convert('RGB')      # .jpg or .png
+        pred, (pred_layout, confidence) = predict_page(net, image, device)
 
-        if out_dir:
-            # tag names the checkpoint, so masks from different runs never collide
-            save_mask(pred, gt_img.getpalette(), join(out_dir, f'{name}_{tag}.png'))
+        # 3b. score against the truth (palette PNG, pixel = class id 0..12)
+        true = np.asarray(Image.open(test_mask / f'{name}.png'))
+        dice, precision, recall = overlap_scores(pred > 0, true > 0)   # any lead vs background
+        ldice = lead_dice(pred, true)                                   # right ink AND right lead
 
-        true_layout = truth.get(name, '?')
-        pred_layout, confidence = layout or ('n/a', float('nan'))
-        results.append(dict(record=name, true_layout=true_layout, pred_layout=pred_layout,
-                            confidence=round(confidence, 4), dice=round(dice, 4),
-                            precision=round(precision, 4), recall=round(recall, 4),
-                            lead_dice=round(ldice, 4),
-                            layout_correct=int(pred_layout == true_layout)))
-        print(f"{name:12s} {true_layout:7s} {pred_layout:7s} {confidence:6.3f} "
+        # 3c. save the mask; tag = checkpoint name, so masks from different runs never collide
+        save_mask(pred, out_dir / f'{name}_{tag}.png')
+
+        # 3d. one report row + one printed line
+        tags = info.get(name, {})
+        true_layout = tags.get('template', '?')
+        rows.append({'record': name, 'page': tags.get('page', '?'), 'persona': tags.get('persona', '?'),
+                     'true_layout': true_layout, 'pred_layout': pred_layout, 'confidence': round(confidence, 4),
+                     'dice': round(dice, 4), 'precision': round(precision, 4), 'recall': round(recall, 4),
+                     'lead_dice': round(ldice, 4), 'layout_correct': int(pred_layout == true_layout)})
+        print(f"{name:24s} {true_layout:7s} {pred_layout:7s} {confidence:6.3f} "
               f"{dice:7.4f} {precision:7.4f} {recall:7.4f} {ldice:7.4f}  "
-              f"{'OK ' if pred_layout == true_layout else 'MISS'}")
+              f"{'OK' if pred_layout == true_layout else 'MISS'}")
 
-    if not results:
-        return results
+    # 4. the mean over all images, printed only (the plot scripts compute their own means)
+    mean = {k: np.mean([r[k] for r in rows]) for k in ('dice', 'precision', 'recall', 'lead_dice', 'layout_correct')}
+    print(f"\nMEAN over {len(rows)}: dice={mean['dice']:.4f}  precision={mean['precision']:.4f}  "
+          f"recall={mean['recall']:.4f}  lead_dice={mean['lead_dice']:.4f}  layout_acc={mean['layout_correct']:.4f}")
 
-    mean = {k: round(float(np.mean([r[k] for r in results])), 4)
-            for k in ('dice', 'precision', 'recall', 'lead_dice', 'layout_correct')}
-    print()
-    print(f"MEAN over {len(results)}: dice={mean['dice']}  precision={mean['precision']}  "
-          f"recall={mean['recall']}  lead_dice={mean['lead_dice']}  layout_acc={mean['layout_correct']}")
-
-    # the report lands next to the masks, so a prediction folder describes itself
-    path = score_csv or join(out_dir or '.', 'score_report.csv')
+    # 5. the report lands next to the masks, so a prediction folder describes itself
+    path = out_dir / 'score_report.csv'
     with open(path, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=list(results[0]))
+        writer = csv.DictWriter(f, fieldnames=list(rows[0]))
         writer.writeheader()
-        writer.writerows(results)
-        writer.writerow({'record': 'MEAN', **mean})
+        writer.writerows(rows)
     print(f'wrote {path}')
-    return results
 
 
 def get_args():
-    parser = argparse.ArgumentParser(description='Predict masks from input images')
-    parser.add_argument('--model', '-m', default='MODEL.pth', metavar='FILE',
-                        help='Specify the file in which the model is stored')
-    parser.add_argument('--input', '-i', metavar='INPUT', nargs='+', help='Filenames of input images')
-    parser.add_argument('--output', '-o', metavar='OUTPUT', nargs='+', help='Filenames of output images')
-    parser.add_argument('--mask-threshold', '-t', type=float, default=0.5,
-                        help='Minimum probability value to consider a mask pixel white')
-    parser.add_argument('--scale', '-s', type=float, default=0.5,
-                        help='Scale factor for the input images')
-    parser.add_argument('--bilinear', action='store_true', default=False, help='Use bilinear upsampling')
-    parser.add_argument('--classes', '-c', type=int, default=13, help='Number of classes (13 = background + 12 leads)')
+    """Only what changes between runs."""
+    parser = argparse.ArgumentParser(description='Predict lead masks + layout for ECG pages')
+    parser.add_argument('--model', '-m', required=True, help='checkpoint (.pth) from train.py')
+    parser.add_argument('--input', '-i', nargs='+', help='single-page mode: image files')
     parser.add_argument('--score', type=int, nargs='?', const=0, default=None,
-                        help='Score mode: evaluate N test images against their masks and print '
-                             'a dice/precision/recall/layout table (no value = all images)')
-    parser.add_argument('--img-dir', default='data/test_imgs', help='Score mode: image directory')
-    parser.add_argument('--mask-dir', default='data/test_labels', help='Score mode: label directory (class-id PNGs)')
-    parser.add_argument('--index-csv', default='data/test_index.csv', help='Score mode: layout labels')
-    parser.add_argument('--save-dir', default=None, help='Score mode: also write predicted masks here')
-    parser.add_argument('--score-csv', default=None,
-                        help='Score mode: path for the per-record CSV report '
-                             '(default: <save-dir>/score_report.csv)')
-    parser.add_argument('--layouts', type=int, default=None,
-                        help='Set to 3 for a checkpoint trained with the layout head. '
-                             'Must match training, or the state_dict will not load.')
-    
+                        help='score mode: the first N test images (no value = all)')
+    parser.add_argument('--save-dir', default='Predictions/test', help='score mode: where masks + score_report.csv go')
     return parser.parse_args()
 
 
-def get_output_filenames(args):
-    def _generate_name(fn):
-        name = os.path.splitext(os.path.basename(fn))[0]
-        return f'Predictions/raw/{name}.png'
-
-    if args.output:
-        return args.output
-    os.makedirs('Predictions/raw', exist_ok=True)
-    return list(map(_generate_name, args.input))
-
-
-def mask_to_image(mask: np.ndarray) -> Image.Image:
-    out = np.zeros((*mask.shape, 3), dtype=np.uint8)
-    out[mask.astype(bool)] = (57, 255, 20)  # neon green, matches ground-truth mask color
-    return Image.fromarray(out)
-
-
 if __name__ == '__main__':
+
+    #take all the args
     args = get_args()
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
-
-    in_files = args.input
-    out_files = get_output_filenames(args) if args.input else []   # not used in --score mode
-
-    net = UNet(n_channels=1, n_classes=args.classes, bilinear=args.bilinear,
-               n_layouts=args.layouts)
-
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    logging.info(f'Loading model {args.model}')
-    logging.info(f'Using device {device}')
 
-    net.to(device=device)
-    state_dict = torch.load(args.model, map_location=device)
-    state_dict.pop('mask_values', None)  # not a real weight, strip before loading
-    net.load_state_dict(state_dict)
+    # 1. build the network exactly as train.py did, then load the trained weights
+    net = UNet(n_channels=3, n_classes=n_classes, n_layouts=n_layouts)
+    state = torch.load(args.model, map_location=device)
+    state.pop('mask_values', None)             # train.py stores it in the checkpoint, but it isn't a weight
+    net.load_state_dict(state)
+    net.to(device)
+    net.eval()                                 # BatchNorm uses its learned statistics
+    logging.info(f'Loaded {args.model} on {device}')
 
-    logging.info('Model loaded!')
-
+    # 2a. score mode
     if args.score is not None:
-        score_dataset(net, device, args.img_dir, args.mask_dir, args.index_csv,
-                      limit=args.score or None, scale=args.scale, out_dir=args.save_dir,
-                      score_csv=args.score_csv,
-                      tag=splitext(os.path.basename(args.model))[0].replace('checkpoint_', ''))
-        sys.exit(0)
+        tag = Path(args.model).stem.replace('checkpoint_', '')         # checkpoint_epoch40 -> epoch40
+        score_test_set(net, device, limit=args.score or None, out_dir=Path(args.save_dir), tag=tag)
 
-    assert args.input, 'either --input/-i or --score is required'
+    # 2b. single-page mode
+    elif args.input:
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        for path in args.input:
+            image = Image.open(path).convert('RGB')                    # phone photos may be RGBA / greyscale
+            mask, (layout, confidence) = predict_page(net, image, device)
+            out_path = raw_dir / f'{Path(path).stem}.png'
+            save_mask(mask, out_path)
+            logging.info(f'{path}: layout {layout} (confidence {confidence:.3f}), mask saved to {out_path}')
 
-    for i, filename in enumerate(in_files):
-        logging.info(f'Predicting image {filename} ...')
-        img = Image.open(filename)
-
-        mask, layout = predict_img(net=net,
-                           full_img=img,
-                           scale_factor=args.scale,
-                           out_threshold=args.mask_threshold,
-                           device=device)
-        if layout is not None:
-            logging.info(f'Predicted layout: {layout[0]}  (confidence {layout[1]:.3f})')
-
-        out_filename = out_files[i]
-        result = mask_to_image(mask)
-        result.save(out_filename)
-        logging.info(f'Mask saved to {out_filename}')
+    else:
+        raise SystemExit('give either --input/-i or --score')

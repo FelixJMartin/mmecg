@@ -30,13 +30,7 @@ def dice_loss(input: Tensor, target: Tensor, multiclass: bool = False):
 
 
 def dice_loss_fg(logits: Tensor, target: Tensor, n_classes: int, eps: float = 1e-5):
-    # BUGFIX (2026-09-23): multiclass_dice_coeff/dice_loss (above) flatten batch AND
-    # class together into one pooled Dice number. With 13 classes where background is
-    # ~98% of pixels (confirmed: 7.42M/7.55M px in a sample mask) and the 12 lead
-    # classes are 1-2px traces, pooling lets a near-perfect background channel drown out
-    # total failure on every real class -- this collapsed segmentation entirely in job
-    # 17603025. Per nnU-Net / Krones et al. (ECG-Digitiser, PhysioNet 2024 winner): Dice
-    # per class (batch dice, dims=(0,2,3)), background excluded, THEN averaged.
+    #dise loss that is to be mimimized
     p = logits.softmax(1).float()
     t = F.one_hot(target, n_classes).permute(0, 3, 1, 2).float()
     dims = (0, 2, 3)

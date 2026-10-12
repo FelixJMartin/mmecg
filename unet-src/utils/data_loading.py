@@ -1,291 +1,112 @@
+"""Serves the ECG training pairs to train.py (and helpers to predict.py / evaluate.py).
+
+
+Whole pages, as they are: no resizing, no cropping, no padding. 3328 x 2496 are both multiples of 16,
+which the U-Net needs (it halves the image 4 times), so every page goes straight in.
+
+One sample = a dict of tensors:
+    'image'      float (3, H, W), values 0..1
+    'mask'       long  (H, W), class ids 0..12
+    'template'   long  scalar, layout index (only if index_csv was given)
+"""
 import csv
-import logging
-import random
+from pathlib import Path
+
 import numpy as np
 import torch
 from PIL import Image
-from functools import partial
-from multiprocessing import Pool
-from os import listdir
-from os.path import splitext, isfile, join
-from pathlib import Path
 from torch.utils.data import Dataset
-from tqdm import tqdm
+
+N_CLASSES = 13                      # background + 12 leads
+
+# layout template -> index for the layout head. FROZEN: reordering silently reinterprets every
+# checkpoint trained before. Only append. Must match layout_keys.csv in the project root.
+TEMPLATE_TO_IDX = {'1x12': 0, '2x6': 1, '4x3+1': 2, '2x6+1': 3}
+IDX_TO_TEMPLATE = {v: k for k, v in TEMPLATE_TO_IDX.items()}    # {0: '1x12', 1: '2x6', ...}
 
 
-# make_dataset.py only ever writes .png files, so no .npy/.pt handling needed here.
-def load_image(filename):
-    return Image.open(filename)
-
-# Returns the distinct pixel values (or RGB tuples) found in one mask file.
-def unique_mask_values(idx, mask_dir, mask_suffix):
-    mask_file = list(mask_dir.glob(idx + mask_suffix + '.*'))[0]
-    mask = np.asarray(load_image(mask_file))
-    if mask.ndim == 2:
-        return np.unique(mask)
-    elif mask.ndim == 3:
-        mask = mask.reshape(-1, mask.shape[-1])
-        return np.unique(mask, axis=0)
-    else:
-        raise ValueError(f'Loaded masks should have 2 or 3 dimensions, found {mask.ndim}')
+# ---------------------------------------------------------------- small helpers
+def image_to_array(pil_img):
+    """PIL image -> float32 array (3, H, W), values 0..1: the format the network takes."""
+    rgb = np.asarray(pil_img.convert('RGB'), dtype=np.float32)    # (H, W, 3), 0..255
+    return rgb.transpose(2, 0, 1) / 255                            # channels first, like PyTorch wants
 
 
-# Layout template -> class index for the classification head. FROZEN: changing this
-# ordering silently reinterprets every checkpoint trained before the change.
-TEMPLATE_TO_IDX = {'1x12': 0, '2x6': 1, '4x3+1': 2}
-IDX_TO_TEMPLATE = {v: k for k, v in TEMPLATE_TO_IDX.items()}
-
-# layout_keys.csv at the repo root is the shared contract (the row splitter and the
-# analysis scripts read it). Kept hardcoded above rather than loaded from the CSV so
-# training cannot die on a missing file inside a queued cluster job -- but when the
-# file IS present, disagreeing with it is a bug worth failing on immediately.
-# Look next to train.py first (that copy ships with the cluster upload), then at the
-# project root for a local checkout. Missing file = check skipped, training still runs.
-_KEYS_CSV = next((p for p in (join(Path(__file__).resolve().parents[1], 'layout_keys.csv'),
-                              join(Path(__file__).resolve().parents[2], 'layout_keys.csv'))
-                  if isfile(p)), '')
-if isfile(_KEYS_CSV):
-    with open(_KEYS_CSV) as _f:
-        _keys = {r['template']: int(r['class_index']) for r in csv.DictReader(_f)}
-    assert TEMPLATE_TO_IDX == _keys, \
-        f'TEMPLATE_TO_IDX {TEMPLATE_TO_IDX} disagrees with {_KEYS_CSV}: {_keys}'
+def mask_to_array(pil_mask):
+    """Palette PNG -> int64 array (H, W) of class ids. The pixel values already are the classes."""
+    return np.asarray(pil_mask, dtype=np.int64)
 
 
+# ---------------------------------------------------------------- the dataset
 class BasicDataset(Dataset):
-    def __init__(self, images_dir: str, mask_dir: str, scale: float = 1.0, mask_suffix: str = '',
-                 index_csv: str = None):
+    def __init__(self, images_dir, mask_dir, index_csv=None):
         self.images_dir = Path(images_dir)
         self.mask_dir = Path(mask_dir)
-        assert 0 < scale <= 1, 'Scale must be between 0 and 1'
-        self.scale = scale
-        self.mask_suffix = mask_suffix  # lets mask filenames differ from image filenames, e.g. img001_mask.png
 
-        # Sample IDs = image filenames without extension. Each id is later paired with
-        # id + mask_suffix + <ext> to find the matching mask.
-        self.ids = [splitext(file)[0] for file in listdir(images_dir) if isfile(join(images_dir, file)) and not file.startswith('.')]
+        # 1. one sample per image file; its name is the file name without extension
+        self.ids = sorted(p.stem for p in self.images_dir.iterdir() if p.is_file())
         if not self.ids:
-            raise RuntimeError(f'No input file found in {images_dir}, make sure you put your images there')
+            raise RuntimeError(f'No images found in {images_dir}')
 
-        logging.info(f'Creating dataset with {len(self.ids)} examples, scanning masks for unique values')
-        # One-time upfront pass over every mask (parallelized) to find every distinct
-        # label value across the whole dataset before training starts.
-        with Pool() as p:
-            unique = list(tqdm(
-                p.imap(partial(unique_mask_values, mask_dir=self.mask_dir, mask_suffix=self.mask_suffix), self.ids),
-                total=len(self.ids)
-            ))
+        # 2. mask value = class id, so the mapping is fixed (train.py stores it in every checkpoint)
+        self.mask_values = list(range(N_CLASSES))
 
-        # Merge the per-file unique values into one sorted list: this becomes the
-        # value -> class-index mapping used by preprocess() below.
-        self.mask_values = list(sorted(np.unique(np.concatenate(unique), axis=0).tolist()))
-        logging.info(f'Unique mask values: {self.mask_values}')
-
-        # Layout label per sample, read from make_dataset.py's index CSV (name,record,template).
-        # Optional: without it the dataset yields images+masks only, exactly as before, so
-        # segmentation-only training keeps working unchanged.
+        # 3. optional: each sample's layout, for the layout head (train.py passes index_csv only with --layouts)
         self.templates = None
         if index_csv is not None:
             with open(index_csv) as f:
-                lookup = {row['name']: row['template'] for row in csv.DictReader(f)}
-            missing = [i for i in self.ids if i not in lookup]
-            # Fail loudly: a silent default here would label whole records as class 0.
-            assert not missing, f'{len(missing)} ids missing from {index_csv}, e.g. {missing[:3]}'
-            self.templates = {i: TEMPLATE_TO_IDX[lookup[i]] for i in self.ids}
-            counts = {t: sum(1 for v in self.templates.values() if v == i)
-                      for t, i in TEMPLATE_TO_IDX.items()}
-            logging.info(f'Layout labels loaded from {index_csv}: {counts}')
+                layout_of = {row['name']: row['template'] for row in csv.DictReader(f)}
+            self.templates = {name: TEMPLATE_TO_IDX[layout_of[name]] for name in self.ids}
 
     def __len__(self):
         return len(self.ids)
 
-    @staticmethod
-    def preprocess(mask_values, pil_img, scale, is_mask):
-        w, h = pil_img.size
-        newW, newH = int(scale * w), int(scale * h)
-        assert newW > 0 and newH > 0, 'Scale is too small, resized images would have no pixel'
-        # NEAREST for masks so resizing never invents new label values between classes;
-        # BICUBIC for images since smooth interpolation is fine (and looks better) there.
-        pil_img = pil_img.resize((newW, newH), resample=Image.NEAREST if is_mask else Image.BICUBIC)
-        img = np.asarray(pil_img)
-
-        if is_mask:
-            # Remap each raw pixel value/color to its class index (0, 1, 2, ...)
-            # using the position of that value in mask_values.
-            mask = np.zeros((newH, newW), dtype=np.int64)
-            for i, v in enumerate(mask_values):
-                if img.ndim == 2:
-                    mask[img == v] = i
-                else:
-                    mask[(img == v).all(-1)] = i
-
-            return mask
-
-        else:
-            # Move channel axis to the front (H, W, C) -> (C, H, W) as expected by PyTorch;
-            # grayscale images get a leading channel dim of 1 instead.
-            if img.ndim == 2:
-                img = img[np.newaxis, ...]
-            else:
-                img = img.transpose((2, 0, 1))
-
-            # Normalize 0-255 images to 0-1; leave already-normalized/float images alone.
-            if (img > 1).any():
-                img = img / 255.0
-
-            return img
-
     def __getitem__(self, idx):
+        """
+        One whole page: image + label, exactly as on disk.
+        """
+
+        # 1. which sample: its name, e.g. "ecg02898_photo_clean"
         name = self.ids[idx]
-        mask_file = list(self.mask_dir.glob(name + self.mask_suffix + '.*'))
-        img_file = list(self.images_dir.glob(name + '.*'))
 
-        assert len(img_file) == 1, f'Either no image or multiple images found for the ID {name}: {img_file}'
-        assert len(mask_file) == 1, f'Either no mask or multiple masks found for the ID {name}: {mask_file}'
-        mask = load_image(mask_file[0])
-        img = load_image(img_file[0])
+        # 2. where its two files are: the photo is a .jpg, the label a .png (from dataset_build/augment.py)
+        img_path = self.images_dir / f"{name}.jpg"
+        mask_path = self.mask_dir / f"{name}.png"
 
-        assert img.size == mask.size, \
-            f'Image and mask {name} should be the same size, but are {img.size} and {mask.size}'
+        img = Image.open(img_path)
+        mask = Image.open(mask_path)
 
-        img = self.preprocess(self.mask_values, img, self.scale, is_mask=False)
-        mask = self.preprocess(self.mask_values, mask, self.scale, is_mask=True)
+        # 4. check they belong together, and fit the U-Net (it halves the image 4 times -> multiple of 16)
+        assert img.size == mask.size, f"{name}: image {img.size} and label {mask.size} differ in size"
+        assert img.width % 16 == 0 and img.height % 16 == 0, \
+            f"{name}: {img.size} is not a multiple of 16 -- rebuild the data with dataset_build/augment.py"
 
-        # .copy() avoids "negative stride" errors torch.as_tensor can raise on some
-        # numpy views (e.g. after transpose); .contiguous() ensures a clean memory layout.
-        sample = {
-            'image': torch.as_tensor(img.copy()).float().contiguous(),
-            'mask': torch.as_tensor(mask.copy()).long().contiguous()
-        }
+        # 5. image -> numbers the network takes: float (3, H, W), values 0..1
+        image = torch.from_numpy(image_to_array(img))
+
+        # 6. label -> one class id per pixel: long (H, W), va
+        label = torch.from_numpy(mask_to_array(mask))
+
+        # 7. pack into the dict the training loop expects (name: so validation can log per image)
+        sample = {"image": image, "mask": label, "name": name}
+
+        # 8. with the layout head: also the page's layout, as an index (CrossEntropyLoss wants an index)
         if self.templates is not None:
-            # Scalar class index (0/1/2); CrossEntropyLoss wants indices, not one-hot.
-            sample['template'] = torch.tensor(self.templates[name], dtype=torch.long)
-        return sample
-
-    def load_raw(self, name):
-        '''Full-resolution (image, mask, template) for one id -- no resize, no crop.
-        Shared by CropView (random training crops) and PadView (full-page eval), so
-        both agree on the exact same class-index mapping (self.mask_values) as the
-        legacy whole-image __getitem__ above, computed once at dataset init.
-        '''
-        mask_file = list(self.mask_dir.glob(name + self.mask_suffix + '.*'))
-        img_file = list(self.images_dir.glob(name + '.*'))
-        assert len(img_file) == 1, f'Either no image or multiple images found for the ID {name}: {img_file}'
-        assert len(mask_file) == 1, f'Either no mask or multiple masks found for the ID {name}: {mask_file}'
-        mask_pil = load_image(mask_file[0])
-        img_pil = load_image(img_file[0])
-        assert img_pil.size == mask_pil.size, \
-            f'Image and mask {name} should be the same size, but are {img_pil.size} and {mask_pil.size}'
-
-        img = np.asarray(img_pil)
-        if img.ndim == 2:
-            img = img[np.newaxis, ...]
-        else:
-            img = img.transpose((2, 0, 1))
-        if (img > 1).any():
-            img = img / 255.0
-
-        raw = np.asarray(mask_pil)
-        mask = np.zeros(raw.shape[:2], dtype=np.int64)
-        for i, v in enumerate(self.mask_values):
-            if raw.ndim == 2:
-                mask[raw == v] = i
-            else:
-                mask[(raw == v).all(-1)] = i
-
-        template = self.templates[name] if self.templates is not None else None
-        return img.astype(np.float32), mask, template
+            sample["template"] = torch.tensor(self.templates[name])
 
 
-class CarvanaDataset(BasicDataset):
-    def __init__(self, images_dir, mask_dir, scale=1, index_csv=None):
-        super().__init__(images_dir, mask_dir, scale, mask_suffix='_mask', index_csv=index_csv)
-
-
-class CropView(Dataset):
-    '''Wraps a torch Subset of a BasicDataset/CarvanaDataset split (e.g. from
-    random_split) and draws full-resolution training crops instead of the base
-    dataset's whole-image resize. With probability fg_oversample, the crop is centred
-    on a random pixel of a randomly-chosen PRESENT class (not a random foreground
-    pixel directly -- that would over-sample whichever lead has the most pixels, e.g.
-    the rhythm strip / 1x12's long leads) instead of a uniform-random window. Per
-    nnU-Net's data_loader_2d.py convention (class first, then a pixel of that class).
-
-    Reuses the base dataset's already-scanned mask_values/templates (via
-    Subset.dataset), so this and PadView below never re-scan the mask directory and
-    always agree on the same class-index mapping.
-    '''
-    def __init__(self, subset, crop_size, fg_oversample: float = 0.0):
-        self.subset = subset
-        self.crop_h, self.crop_w = crop_size
-        self.fg_oversample = fg_oversample
-
-    def __len__(self):
-        return len(self.subset)
-
-    def __getitem__(self, i):
-        ds = self.subset.dataset
-        name = ds.ids[self.subset.indices[i]]
-        img, mask, template = ds.load_raw(name)
-        H, W = mask.shape
-        ch, cw = min(self.crop_h, H), min(self.crop_w, W)
-
-        top = left = None
-        if random.random() < self.fg_oversample:
-            classes = np.unique(mask)
-            classes = classes[classes != 0]
-            if len(classes):
-                cls = int(random.choice(classes.tolist()))
-                ys, xs = np.where(mask == cls)
-                j = random.randrange(len(ys))
-                cy, cx = int(ys[j]), int(xs[j])
-                top = min(max(cy - ch // 2, 0), H - ch)
-                left = min(max(cx - cw // 2, 0), W - cw)
-        if top is None:
-            top = random.randrange(H - ch + 1)
-            left = random.randrange(W - cw + 1)
-
-        img_c = img[:, top:top + ch, left:left + cw]
-        mask_c = mask[top:top + ch, left:left + cw]
-
-        sample = {
-            'image': torch.as_tensor(img_c.copy()).float().contiguous(),
-            'mask': torch.as_tensor(mask_c.copy()).long().contiguous(),
-        }
-        if template is not None:
-            sample['template'] = torch.tensor(template, dtype=torch.long)
         return sample
 
 
-class PadView(Dataset):
-    '''Wraps a Subset, returning the FULL (uncropped) image/mask, padded on the
-    bottom/right to a multiple of pad_to so a fully-convolutional forward pass can run
-    in one shot at eval time (no sliding-window stitching). Also returns orig_size so
-    the caller can crop the network's output back before scoring -- otherwise the
-    padded rows/columns (arbitrary content, not real page) would pollute
-    trace_recall/precision/coverage/centre_rmse_mv.
-    '''
-    def __init__(self, subset, pad_to: int = 16):
-        self.subset = subset
-        self.pad_to = pad_to
+# ---------------------------------------------------------------- class balance, for the loss weights
+def class_pixel_counts(dataset, indices, n_classes=N_CLASSES):
+    """How many pixels of each class the given samples contain, read from the label PNGs only.
 
-    def __len__(self):
-        return len(self.subset)
-
-    def __getitem__(self, i):
-        ds = self.subset.dataset
-        name = ds.ids[self.subset.indices[i]]
-        img, mask, template = ds.load_raw(name)
-        _, H, W = img.shape
-        ph, pw = (-H) % self.pad_to, (-W) % self.pad_to
-        if ph or pw:
-            img = np.pad(img, ((0, 0), (0, ph), (0, pw)))
-            mask = np.pad(mask, ((0, ph), (0, pw)))
-
-        sample = {
-            'image': torch.as_tensor(img.copy()).float().contiguous(),
-            'mask': torch.as_tensor(mask.copy()).long().contiguous(),
-            'orig_size': torch.tensor([H, W]),
-        }
-        if template is not None:
-            sample['template'] = torch.tensor(template, dtype=torch.long)
-        return sample
+    train.py turns these into class weights (background is ~98 % of all pixels). Only the labels
+    are opened: loading the full images too ran a cluster job out of memory before training began.
+    """
+    counts = np.zeros(n_classes, dtype=np.int64)
+    for i in indices:
+        mask = mask_to_array(Image.open(dataset.mask_dir / f"{dataset.ids[i]}.png"))
+        counts += np.bincount(mask.ravel(), minlength=n_classes)
+    return counts
